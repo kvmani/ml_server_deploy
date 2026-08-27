@@ -14,7 +14,7 @@
 # production release.
 
 schema: ml-suite.manifest.v1
-suite_version: 1.0.0
+suite_version: 1.0.1
 
 platform:
   os_id: ubuntu
@@ -64,6 +64,24 @@ shared_dirs:
 # added a quarter of an hour to every build, while telling us nothing about
 # whether the suite would deploy. Each component repository owns its own CI.
 # Pass --run-component-tests to tools/dependency_gate.py to run them by hand.
+
+# Extra package indexes needed to install the pinned set.
+#
+# torch resolves to a local version such as `2.13.0+cpu`, and that wheel exists
+# only on a PyTorch CPU index -- never on PyPI. Installing resolved.txt without
+# this fails on torch alone, which is precisely what happened the first time the
+# real archive was installed.
+#
+# The office server should point this at its own internal mirror. Override it
+# without editing the manifest, either way:
+#   ML_PIP_EXTRA_INDEX_URL=http://pytorch-cpu.intranet.local/whl/cpu ./update.sh ...
+#   ./update.sh <archive> --extra-index-url http://pytorch-cpu.intranet.local/whl/cpu
+# Set ML_PIP_EXTRA_INDEX_URL to the empty string to use only the configured
+# mirror in /etc/pip.conf.
+pip:
+  extra_index_urls:
+    - https://download.pytorch.org/whl/cpu
+
 environments:
   shared:
     path: .venv

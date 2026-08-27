@@ -34,6 +34,8 @@ SKIP_CHECKSUM=0
 NO_RESTART=0
 NO_DEPS=0
 HEALTH_WAIT=90
+EXTRA_INDEX_URLS=()
+EXTRA_INDEX_SET=0
 
 usage() { sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0; }
 
@@ -43,6 +45,7 @@ while (( $# )); do
         --systemd-scope) SCOPE_ARG="$2"; shift 2 ;;
         --port-offset)   PORT_OFFSET="$2"; shift 2 ;;
         --health-wait)   HEALTH_WAIT="$2"; shift 2 ;;
+        --extra-index-url) EXTRA_INDEX_URLS+=("$2"); EXTRA_INDEX_SET=1; shift 2 ;;
         --dry-run)       DRY_RUN=1; shift ;;
         --force)         FORCE=1; shift ;;
         --adopt-legacy)  ADOPT_LEGACY=1; shift ;;
@@ -115,7 +118,14 @@ while IFS= read -r member; do
     esac
 done <<<"$MEMBERS"
 
-ARCHIVE_PREFIX="$(printf '%s\n' "$MEMBERS" | head -1 | cut -d/ -f1)"
+# Extracted with parameter expansion rather than `printf ... | head -1 | cut`.
+# A real suite archive holds several thousand members, and `head -1` closes the
+# pipe as soon as it has the first line, killing printf with SIGPIPE (exit 141).
+# Under `set -o pipefail` that aborts the deployment. The fixture archives used
+# in the rehearsal were small enough that printf finished first, so this only
+# appeared against a full-size release.
+FIRST_MEMBER="${MEMBERS%%$'\n'*}"
+ARCHIVE_PREFIX="${FIRST_MEMBER%%/*}"
 [[ -n "$ARCHIVE_PREFIX" ]] || die "archive has no top-level directory"
 STRAY="$(printf '%s\n' "$MEMBERS" | cut -d/ -f1 | sort -u | grep -v "^${ARCHIVE_PREFIX}$" || true)"
 [[ -z "$STRAY" ]] || die "archive has more than one top-level directory: ${ARCHIVE_PREFIX} and ${STRAY}"
@@ -513,10 +523,42 @@ else
         "$PYTHON_BIN" -m venv "$ML_VENV" || fail_and_rollback "could not create the virtual environment"
     fi
 
+    # Extra package indexes.
+    #
+    # torch resolves to a local version such as 2.13.0+cpu, and that wheel exists
+    # only on a PyTorch CPU index -- never on PyPI. Installing resolved.txt
+    # without one fails on torch alone, which is exactly what happened the first
+    # time the real archive was installed.
+    #
+    # Precedence: --extra-index-url, then ML_PIP_EXTRA_INDEX_URL (which may be
+    # set to the empty string to use only the mirror in /etc/pip.conf), then
+    # whatever the manifest declares.
+    PIP_INDEX_ARGS=()
+    if (( EXTRA_INDEX_SET )); then
+        for url in "${EXTRA_INDEX_URLS[@]}"; do
+            PIP_INDEX_ARGS+=(--extra-index-url "$url")
+        done
+    elif [[ -n "${ML_PIP_EXTRA_INDEX_URL+x}" ]]; then
+        if [[ -n "$ML_PIP_EXTRA_INDEX_URL" ]]; then
+            PIP_INDEX_ARGS+=(--extra-index-url "$ML_PIP_EXTRA_INDEX_URL")
+        fi
+    else
+        while read -r url; do
+            [[ -n "$url" ]] || continue
+            PIP_INDEX_ARGS+=(--extra-index-url "$url")
+        done < <(mf 'pip.extra_index_urls' 2>/dev/null || true)
+    fi
+    if (( ${#PIP_INDEX_ARGS[@]} )); then
+        log "extra package index(es) in use: ${PIP_INDEX_ARGS[*]}"
+    else
+        log "no extra package index configured; using only the mirror in pip.conf"
+    fi
+
     RESOLVED_REQ="${TARGET_RELEASE}/requirements/resolved.txt"
     if [[ -f "$RESOLVED_REQ" ]]; then
         log "installing from requirements/resolved.txt (fully pinned by the release build)"
-        if ! "${ML_VENV}/bin/python" -m pip install --disable-pip-version-check -r "$RESOLVED_REQ"; then
+        if ! "${ML_VENV}/bin/python" -m pip install --disable-pip-version-check \
+                "${PIP_INDEX_ARGS[@]}" -r "$RESOLVED_REQ"; then
             fail_and_rollback "dependency installation failed. The office pip mirror may be unreachable, or a
 pinned package may be missing from it. requirements/mirror_audit.txt in this release
 lists everything the mirror must carry."
@@ -530,7 +572,8 @@ lists everything the mirror must carry."
                 req_path="${TARGET_RELEASE}/apps/${app_dir}/${req}"
                 [[ -f "$req_path" ]] || { warn "  ${id}: ${req} not found, skipping"; continue; }
                 log "  ${id}: pip install -r ${req}"
-                "${ML_VENV}/bin/python" -m pip install --disable-pip-version-check -r "$req_path" \
+                "${ML_VENV}/bin/python" -m pip install --disable-pip-version-check \
+                    "${PIP_INDEX_ARGS[@]}" -r "$req_path" \
                     || fail_and_rollback "dependency installation failed for ${id}"
             done < <(mf "services.${id}.requirements" 2>/dev/null || true)
         done < <(service_ids)

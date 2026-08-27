@@ -105,6 +105,7 @@ systemctl --user status  ml-platform-pytex.service
 | `port NNNN is in use by something that is not our service` | Something else is on a suite port | Find it with `ss -ltnp`, stop it, or use `--port-offset 100` |
 | `pip check FAILED` | The release's dependencies are mutually incompatible | Nothing was activated; the old release is still serving. Report the output — the fix is on the development side |
 | `dependency installation failed` | The pip mirror is unreachable, or is missing a package | Check `/etc/pip.conf`. `requirements/mirror_audit.txt` in the release lists every package the mirror must carry |
+| `No matching distribution found for torch==...+cpu` | The CPU-only torch index is not configured | See "The torch index" below |
 | `found a legacy installation at /opt/ml_server` | An older-style install is present | This is a migration, not a routine update. Use `--adopt-legacy` only deliberately |
 | `another deployment is already running` | Two updates at once | Wait for the first to finish |
 | `the user systemd session is unavailable` | Linger is off, or you are on a bare SSH session | `loginctl enable-linger kvmani`, then log out and back in |
@@ -127,6 +128,30 @@ cat /etc/pip.conf          # must point at the internal mirror
 # Then deploy as normal.
 ./update.sh /path/to/ml-server-suite-vX.Y.Z.tar.gz
 ```
+
+### The torch index
+
+Hydride needs PyTorch, and the release pins it to a CPU-only build such as
+`torch==2.13.0+cpu`. That exact wheel exists only on a PyTorch CPU index — it is
+never on PyPI — so the install needs to be told where to find it. Point it at
+the office's internal mirror:
+
+```bash
+export ML_PIP_EXTRA_INDEX_URL=http://pytorch-cpu.intranet.local/whl/cpu
+./update.sh /path/to/ml-server-suite-vX.Y.Z.tar.gz
+```
+
+or per-run:
+
+```bash
+./update.sh <archive> --extra-index-url http://pytorch-cpu.intranet.local/whl/cpu
+```
+
+If your site mirror already serves the CPU torch wheels through the index in
+`/etc/pip.conf`, set `ML_PIP_EXTRA_INDEX_URL=""` so nothing else is contacted.
+
+Never let this host install the default PyTorch wheels: they bundle the CUDA
+runtime, adding several gigabytes of GPU libraries to a machine with no GPU.
 
 ### Hydride model checkpoints
 

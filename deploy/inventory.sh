@@ -64,6 +64,17 @@ run() {
 
 report() {
 
+# Errexit and pipefail are deliberately relaxed for the body of the report.
+#
+# This script is the first thing run on an unfamiliar office server and its only
+# job is to describe what is there. A diagnostic that aborts two thirds of the
+# way through because a `find | head -20` took SIGPIPE, or because one probe of
+# an absent directory returned non-zero, is far worse than one that prints an
+# odd line and carries on. Nothing here modifies anything, so there is no
+# half-completed state to protect against.
+set +e
+set +o pipefail
+
 printf 'ML Server suite -- server inventory\n'
 printf 'generated  %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 printf 'host       %s\n' "$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo unknown)"
