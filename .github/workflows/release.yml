@@ -224,7 +224,12 @@ jobs:
       # Gate 6: the archive must be able to install itself.
       # ---------------------------------------------------------------
 
-      - name: Rehearse the deployment against the built archive
+      # Note: this runs the fixture rehearsal, which exercises the deployment
+      # scripts end to end against purpose-built archives. It does not install
+      # the real archive built above -- that needs the office mirror and the
+      # hydride checkpoints. The real archive is verified on the office staging
+      # root, per RUNBOOK.md.
+      - name: Deployment rehearsal (fixture suite, real systemd)
         working-directory: deploy-repo
         run: |
           set -euo pipefail

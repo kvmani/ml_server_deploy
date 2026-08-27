@@ -144,26 +144,50 @@ def rewrite_github_requirements(staging: Path, manifest: dict[str, Any]) -> list
     return notes
 
 
-def assert_no_github_references(staging: Path) -> None:
-    """Fail the build if anything still points at GitHub for a dependency."""
-    offenders: list[str] = []
-    for path in staging.rglob("*"):
-        if not path.is_file() or path.suffix not in SCAN_SUFFIXES:
+def assert_no_github_dependencies(staging: Path) -> list[str]:
+    """Fail if anything pip reads at deploy time resolves from GitHub.
+
+    Scope matters here. An earlier version scanned every text file for a GitHub
+    URL and failed the build on npm sponsorship links in a package-lock, on the
+    provenance metadata recording where a pretrained model architecture came
+    from, and on a dataset citation. None of those are ever fetched; flagging
+    them made the check noise rather than a safeguard.
+
+    What actually matters is the files pip consumes: requirements files, which
+    update.sh installs from. A GitHub URL there stops the office install dead.
+
+    pyproject.toml is reported but not fatal. The deployment never runs
+    `pip install .` -- application code runs from the release tree via
+    PYTHONPATH -- so a GitHub pin there is inert, though still worth knowing
+    about because it would bite anyone who did try to install the package.
+    """
+    fatal: list[str] = []
+    warnings: list[str] = []
+
+    for path in staging.rglob("requirements*.txt"):
+        if not path.is_file():
             continue
-        # The manifest legitimately records `owner/name` repositories and is
-        # never used to fetch anything at deploy time.
-        if path.name.startswith("manifest.resolved"):
+        for number, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith("#") or not stripped:
+                continue
+            if GITHUB_PATTERN.search(stripped.encode()):
+                fatal.append(f"{path.relative_to(staging)}:{number}: {stripped}")
+
+    for path in staging.rglob("pyproject.toml"):
+        if not path.is_file():
             continue
-        data = path.read_bytes()
-        if GITHUB_PATTERN.search(data):
-            for number, line in enumerate(data.decode("utf-8", "replace").splitlines(), 1):
-                if GITHUB_PATTERN.search(line.encode()):
-                    offenders.append(f"{path.relative_to(staging)}:{number}: {line.strip()}")
-    if offenders:
+        for number, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            stripped = line.strip()
+            if "@" in stripped and GITHUB_PATTERN.search(stripped.encode()):
+                warnings.append(f"{path.relative_to(staging)}:{number}: {stripped}")
+
+    if fatal:
         raise BuildError(
-            "the assembled tree still resolves dependencies from GitHub, which an "
-            "air-gapped office server cannot reach:\n  " + "\n  ".join(offenders)
+            "the assembled tree still resolves dependencies from GitHub in files pip reads, "
+            "which an air-gapped office server cannot reach:\n  " + "\n  ".join(fatal)
         )
+    return warnings
 
 
 # ---------------------------------------------------------------------------
@@ -263,7 +287,8 @@ def assemble(manifest: dict[str, Any], sources: dict[str, Path], staging: Path,
         shutil.copy2(runbook, staging / "RUNBOOK.md")
 
     notes.extend(rewrite_github_requirements(staging, manifest))
-    assert_no_github_references(staging)
+    for warning in assert_no_github_dependencies(staging):
+        notes.append(f"note (not fatal, pip never reads this at deploy time): {warning}")
 
     version = manifest["suite_version"]
     (staging / "VERSION").write_text(f"{version}\n", encoding="utf-8", newline="\n")
