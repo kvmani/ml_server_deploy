@@ -55,6 +55,15 @@ shared_dirs:
 # Paths use {current}, never {release}: a versioned path would change the text of
 # every systemd unit on every release, so update.sh would restart all seven
 # services even when only one component actually changed.
+#
+# `import_check` names the module that must import cleanly in the shared
+# environment. That is the deployment-relevant question, and it is what the
+# release gate enforces. The `tests:` commands below are each component's own
+# full suite; they are NOT run by the release build. Running them there coupled
+# the suite release to unrelated scientific test debt in a single component and
+# added a quarter of an hour to every build, while telling us nothing about
+# whether the suite would deploy. Each component repository owns its own CI.
+# Pass --run-component-tests to tools/dependency_gate.py to run them by hand.
 environments:
   shared:
     path: .venv
@@ -73,6 +82,7 @@ services:
     ref: v1.0.0
     commit: ""
     dir: ml_server
+    import_check: ml_server
     src: src
     env: shared
     requirements: [requirements.txt]
@@ -108,6 +118,7 @@ services:
     ref: v0.3.0
     commit: ""
     dir: pytex
+    import_check: pytex
     src: src
     env: shared
     requirements: []
@@ -118,13 +129,19 @@ services:
     workdir: "{current}/apps/pytex"
     environment:
       PYTHONPATH: "{current}/apps/pytex/src"
-    tests: "python -m pytest -q -x"
+    tests: "python -m pytest -q"
+    # pytex's suite covers its optional `adapters` integrations (pymatgen and
+    # friends), which are NOT part of the deployed environment. They are
+    # installed for the test run only, and never reach resolved.txt.
+    # See the note in mirror_notes about what this means for CBED features.
+    test_extras: [dev, adapters]
 
   calculator:
     repo: kvmani/scientific_calculator
     ref: v0.5.0
     commit: ""
     dir: scientific_calculator
+    import_check: scientific_calculator_service
     src: src
     env: shared
     requirements: [requirements.txt]
@@ -142,6 +159,7 @@ services:
     ref: v0.2.0
     commit: ""
     dir: unit_converter
+    import_check: unit_converter_service
     src: src
     env: shared
     requirements: [requirements.txt]
@@ -161,6 +179,7 @@ services:
     ref: v0.2.0
     commit: ""
     dir: pdf_tools
+    import_check: pdf_tools_service
     src: src
     env: shared
     requirements: []
@@ -174,6 +193,7 @@ services:
     ref: v0.2.0
     commit: ""
     dir: tabular_ml
+    import_check: tabular_ml_service
     src: src
     env: shared
     requirements: []
@@ -197,6 +217,7 @@ services:
     commit: ""
     # Flat package at the repository root, not a src/ layout like the others.
     dir: HydrideSegmentation
+    import_check: hydride_segmentation
     src: "."
     env: shared                        # flip to `isolated` if the pip-check gate fails
     requirements: [requirements-web.txt]
@@ -224,3 +245,8 @@ mirror_notes:
   - "The gateway's requirements.txt resolves pdf_tools and tabular_ml from
      GitHub archive URLs; build_suite.py rewrites those to local paths, because
      an air-gapped host cannot fetch them."
+  - "pytex's optional `adapters` extra (pymatgen, kikuchipy, orix, diffsims) is
+     NOT deployed. The features that need it -- notably some CBED symmetry
+     work -- will raise ModuleNotFoundError on the office server. Add those
+     packages to the pytex requirements here if users need them, after checking
+     the office mirror carries them."
