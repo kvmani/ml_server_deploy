@@ -232,19 +232,30 @@ jobs:
       - name: Deployment rehearsal (fixture suite, real systemd)
         working-directory: deploy-repo
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          # The exec bit is tracked in git, but this is cheap insurance and the
+          # CI job does the same; a difference between the two jobs is exactly
+          # the kind of thing that makes one pass and the other fail.
+          chmod +x deploy/*.sh tests/rehearsal/*.sh
           # GitHub runners have a user systemd session only when linger is on.
           # If it cannot be enabled, the systemd-dependent scenarios are skipped
           # here and remain covered by the WSL rehearsal; the rest still run.
           sudo loginctl enable-linger "$USER" || true
           XDG_RUNTIME_DIR="/run/user/$(id -u)"
           export XDG_RUNTIME_DIR
+          rc=0
           if systemctl --user is-system-running >/dev/null 2>&1; then
-            ./tests/rehearsal/run.sh
+            ./tests/rehearsal/run.sh 2>&1 | tee /tmp/rehearsal.log || rc=$?
           else
             echo "::warning::no user systemd session on this runner; running only the non-systemd scenarios"
             ./tests/rehearsal/run.sh corrupt_archive missing_checksum truncated_archive \
-              path_traversal not_a_suite_archive wrong_platform legacy_layout
+              path_traversal not_a_suite_archive wrong_platform legacy_layout 2>&1 \
+              | tee /tmp/rehearsal.log || rc=$?
+          fi
+          if [ "$rc" != "0" ]; then
+            # Surface the reason on the run itself; job logs need admin rights.
+            echo "::error title=Rehearsal output::$(tail -c 3000 /tmp/rehearsal.log | sed ':a;N;$!ba;s/\n/%0A/g')"
+            exit "$rc"
           fi
 
       - name: Publish the release
