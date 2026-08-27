@@ -171,11 +171,21 @@ jobs:
       - name: Dependency gate (install, pip check, import every component)
         working-directory: deploy-repo
         run: |
-          python tools/dependency_gate.py \
+          # The output is captured and the tail re-emitted as an annotation on
+          # failure. The gate annotates its own known error cases, but a plain
+          # traceback would otherwise leave nothing behind except "exit code 1",
+          # and job logs need repository admin rights to download.
+          set -o pipefail
+          rc=0
+          python -u tools/dependency_gate.py \
             --manifest manifest.resolved.yml \
             --components ../components \
             --venv ../depcheck \
-            --out requirements
+            --out requirements 2>&1 | tee /tmp/gate.log || rc=$?
+          if [ "$rc" != "0" ]; then
+            echo "::error title=Dependency gate output::$(tail -40 /tmp/gate.log | sed ':a;N;$!ba;s/\n/%0A/g')"
+            exit "$rc"
+          fi
 
       # ---------------------------------------------------------------
       # Assemble, twice, and prove the two builds are identical.
