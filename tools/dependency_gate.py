@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -44,6 +45,22 @@ class GateError(Exception):
 def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
     print(f"    $ {' '.join(str(part) for part in command)}", flush=True)
     return subprocess.run(command, **kwargs)
+
+
+def annotate(title: str, message: str) -> None:
+    """Surface a failure reason in the GitHub Actions run summary.
+
+    Without this a failed gate shows only "Process completed with exit code 1",
+    and the reason is buried in a log that needs repository admin rights to
+    download. An annotation is visible on the run itself and through the API,
+    which is the difference between diagnosing a failed release in a minute and
+    guessing at it.
+    """
+    if not os.environ.get("GITHUB_ACTIONS"):
+        return
+    # Annotations are single-line; newlines are encoded.
+    encoded = message.replace("\r", "").replace("\n", "%0A")
+    print(f"::error title={title}::{encoded}", flush=True)
 
 
 def pyproject_dependencies(directory: Path) -> list[str]:
@@ -181,19 +198,30 @@ def main() -> int:
 
         if not args.skip_install:
             print("\n== installing")
+            # Captured rather than streamed so that the reason for a failure can
+            # be turned into an annotation. Downloading a job log needs admin
+            # rights on the repository, so a failure that only lives in the log
+            # is effectively invisible.
             result = run([str(python), "-m", "pip", "install",
                           "--extra-index-url", CPU_INDEX,
-                          "-r", str(declared)])
+                          "-r", str(declared)],
+                         capture_output=True, text=True)
+            print(result.stdout)
             if result.returncode != 0:
+                print(result.stderr, file=sys.stderr)
+                tail = "\n".join((result.stderr or result.stdout).strip().splitlines()[-25:])
+                annotate("Dependency install failed", tail)
                 raise GateError(
                     "the combined dependency set could not be installed. Either a pin is wrong, "
-                    "or two components disagree about a shared package."
+                    "or two components disagree about a shared package.\n" + tail
                 )
 
         # --- 2. coherence -------------------------------------------------
         print("\n== pip check")
-        result = run([str(python), "-m", "pip", "check"])
+        result = run([str(python), "-m", "pip", "check"], capture_output=True, text=True)
+        print(result.stdout)
         if result.returncode != 0:
+            annotate("pip check failed", (result.stdout or result.stderr).strip())
             raise GateError(
                 "pip check failed: the components cannot share one environment as pinned.\n"
                 "If this is the torch/portal conflict, set `env: isolated` on the offending\n"
@@ -253,6 +281,8 @@ def main() -> int:
             else:
                 last = (probe.stderr.strip().splitlines() or ["unknown error"])[-1]
                 print(f"    FAILED   {name:<12} import {module}: {last}")
+                annotate(f"{name}: import {module} failed",
+                         (probe.stderr or "").strip()[-1500:])
                 failures.append(f"{name}: `import {module}` failed: {last}")
 
         # --- 5. the components' own suites, only when explicitly asked -----
@@ -308,9 +338,10 @@ def main() -> int:
                     failures.append(f"{name}: `{command}` exited {result.returncode}")
 
         if failures:
-            print("\n== FAILED component test suites")
+            print("\n== FAILURES")
             for failure in failures:
                 print(f"    {failure}")
+            annotate("Dependency gate failed", "\n".join(failures))
             raise GateError(f"{len(failures)} check(s) failed; this release will not be published")
 
         print("\n== dependency gate passed")
