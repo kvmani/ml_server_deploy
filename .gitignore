@@ -1,0 +1,9 @@
+dist/
+__pycache__/
+.pytest_cache/
+*.pyc
+manifest.resolved.yml
+manifest.resolved.json
+requirements/declared.txt
+requirements/resolved.txt
+requirements/mirror_audit.txt

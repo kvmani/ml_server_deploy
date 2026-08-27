@@ -1,0 +1,318 @@
+name: Build suite release
+
+# Tagging the deployment repository is the only action a routine release needs.
+# Everything below runs on the Internet side; the office server never talks to
+# GitHub and only ever sees the two files attached to the Release.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      suite_version:
+        description: "Suite version to build (defaults to manifest.yml)"
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # Must match the office platform: the dependency gate below is only
+    # meaningful if it resolves on the same distribution and Python.
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out the deployment repository
+        uses: actions/checkout@v4
+        with:
+          path: deploy-repo
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tooling
+        run: python -m pip install --upgrade pip pyyaml
+
+      # ---------------------------------------------------------------
+      # Gate 1: the manifest itself, and the Windows-artifact checks.
+      # ---------------------------------------------------------------
+
+      - name: Validate the manifest
+        working-directory: deploy-repo
+        run: python tools/manifest.py --validate manifest.yml
+
+      - name: Check text hygiene (CRLF, BOM, shebangs, case collisions)
+        working-directory: deploy-repo
+        run: python tools/check_text_hygiene.py
+
+      - name: Verify shell scripts are executable and parse
+        working-directory: deploy-repo
+        run: |
+          set -euo pipefail
+          fail=0
+          for script in deploy/*.sh tests/rehearsal/*.sh; do
+            bash -n "$script" || fail=1
+            mode="$(git ls-files -s "$script" | awk '{print $1}')"
+            if [ "$mode" != "100755" ]; then
+              echo "::error file=$script::mode is $mode, expected 100755. Fix with: git update-index --chmod=+x $script"
+              fail=1
+            fi
+          done
+          exit $fail
+
+      - name: ShellCheck
+        working-directory: deploy-repo
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y shellcheck
+          shellcheck -S warning -x deploy/*.sh deploy/lib/*.sh tests/rehearsal/*.sh
+
+      - name: Unit tests
+        working-directory: deploy-repo
+        run: |
+          python -m pip install pytest
+          python -m pytest tests/unit -q
+
+      # ---------------------------------------------------------------
+      # Gate 2: resolve every component to an immutable commit.
+      # ---------------------------------------------------------------
+
+      - name: Resolve component pins to exact commits
+        working-directory: deploy-repo
+        env:
+          # HYDRIDE_TOKEN is only needed if Pushpalathadevi/HydrideSegmentation
+          # is private; GITHUB_TOKEN cannot read another owner's private repo.
+          GITHUB_TOKEN: ${{ secrets.COMPONENT_READ_TOKEN || github.token }}
+        run: |
+          python tools/manifest.py --resolve manifest.yml --out manifest.resolved.yml
+          echo "--- resolved pins ---"
+          cat manifest.resolved.yml
+
+      - name: Check out every component at its pinned commit
+        working-directory: deploy-repo
+        env:
+          GITHUB_TOKEN: ${{ secrets.COMPONENT_READ_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p ../components
+          python - <<'PY' > ../checkout.sh
+          import yaml
+          with open("manifest.resolved.yml", encoding="utf-8") as handle:
+              document = yaml.safe_load(handle)
+          print("set -euo pipefail")
+          for name, service in document["services"].items():
+              repo, commit = service["repo"], service["commit"]
+              directory = service.get("dir", name)
+              print(f'echo "::group::{name} {repo}@{commit}"')
+              print(f'git init -q "../components/{directory}"')
+              print(f'git -C "../components/{directory}" remote add origin '
+                    f'"https://x-access-token:${{GITHUB_TOKEN}}@github.com/{repo}.git"')
+              # Fetching the single pinned commit avoids cloning history we do
+              # not ship and makes an unreachable pin fail loudly here.
+              print(f'git -C "../components/{directory}" fetch -q --depth 1 origin {commit}')
+              print(f'git -C "../components/{directory}" checkout -q FETCH_HEAD')
+              print('echo "::endgroup::"')
+          PY
+          bash ../checkout.sh
+
+      # ---------------------------------------------------------------
+      # Gate 3: each component's own tests must pass.
+      # ---------------------------------------------------------------
+
+      - name: Run component test suites
+        working-directory: deploy-repo
+        continue-on-error: false
+        run: |
+          set -uo pipefail
+          failed=""
+          python - <<'PY' > ../tests.sh
+          import yaml
+          with open("manifest.resolved.yml", encoding="utf-8") as handle:
+              document = yaml.safe_load(handle)
+          for name, service in document["services"].items():
+              command = service.get("tests")
+              if not command:
+                  continue
+              directory = service.get("dir", name)
+              print(f'echo "::group::tests {name}"')
+              print(f'(cd "../components/{directory}" && {command}) || echo "TESTFAIL {name}"')
+              print('echo "::endgroup::"')
+          PY
+          bash ../tests.sh | tee ../test-output.txt
+          if grep -q '^TESTFAIL' ../test-output.txt; then
+            echo "::error::a component test suite failed; this release will not be published"
+            grep '^TESTFAIL' ../test-output.txt
+            exit 1
+          fi
+
+      # ---------------------------------------------------------------
+      # Gate 4: frontend builds happen here, never in the office.
+      # ---------------------------------------------------------------
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build frontend assets
+        working-directory: deploy-repo
+        run: |
+          set -euo pipefail
+          python - <<'PY' > ../npm.sh
+          import yaml
+          with open("manifest.resolved.yml", encoding="utf-8") as handle:
+              document = yaml.safe_load(handle)
+          print("set -euo pipefail")
+          for name, service in document["services"].items():
+              build = service.get("npm_build")
+              if not build:
+                  continue
+              directory = service.get("dir", name)
+              print(f'echo "::group::npm build {name}"')
+              print(f'(cd "../components/{directory}/{build["dir"]}" && {build["command"]})')
+              print('echo "::endgroup::"')
+          PY
+          bash ../npm.sh
+
+      # ---------------------------------------------------------------
+      # Gate 5: the dependency set must actually resolve, on this platform,
+      # and every package must be nameable for the office mirror.
+      # ---------------------------------------------------------------
+
+      - name: Resolve and verify the shared dependency set
+        working-directory: deploy-repo
+        run: |
+          set -euo pipefail
+          mkdir -p requirements
+          python -m venv ../depcheck
+          ../depcheck/bin/python -m pip install --upgrade pip >/dev/null
+
+          # Collect every component's declared requirements, with the GitHub
+          # archive pins stripped: those components are in the archive already.
+          : > ../combined.txt
+          python - <<'PY' >> ../combined.txt
+          from pathlib import Path
+          import yaml
+          with open("manifest.resolved.yml", encoding="utf-8") as handle:
+              document = yaml.safe_load(handle)
+          for name, service in document["services"].items():
+              directory = service.get("dir", name)
+              for requirement_file in service.get("requirements") or []:
+                  path = Path("../components") / directory / requirement_file
+                  if not path.is_file():
+                      continue
+                  for line in path.read_text(encoding="utf-8").splitlines():
+                      stripped = line.strip()
+                      if not stripped or stripped.startswith("#"):
+                          continue
+                      if "github.com" in stripped.lower():
+                          continue
+                      if stripped.startswith("-r "):
+                          continue
+                      print(stripped)
+          PY
+
+          sort -u ../combined.txt > requirements/declared.txt
+          echo "--- declared requirements ---"; cat requirements/declared.txt
+
+          # torch must come from the CPU index; the default wheels carry the
+          # CUDA runtime and add gigabytes to an office machine with no GPU.
+          ../depcheck/bin/python -m pip install \
+            --extra-index-url https://download.pytorch.org/whl/cpu \
+            -r requirements/declared.txt
+
+          echo "--- pip check ---"
+          ../depcheck/bin/python -m pip check
+
+          ../depcheck/bin/python -m pip freeze --exclude-editable > requirements/resolved.txt
+          cut -d= -f1 requirements/resolved.txt | sort -u > requirements/mirror_audit.txt
+          echo "--- $(wc -l < requirements/resolved.txt) packages pinned ---"
+
+      # ---------------------------------------------------------------
+      # Assemble, twice, and prove the two builds are identical.
+      # ---------------------------------------------------------------
+
+      - name: Assemble the suite archive
+        id: assemble
+        working-directory: deploy-repo
+        run: |
+          set -euo pipefail
+          args=""
+          while IFS= read -r line; do args="$args $line"; done < <(
+            python - <<'PY'
+          import yaml
+          with open("manifest.resolved.yml", encoding="utf-8") as handle:
+              document = yaml.safe_load(handle)
+          for name, service in document["services"].items():
+              print(f'--source={name}=../components/{service.get("dir", name)}')
+          PY
+          )
+          # shellcheck disable=SC2086
+          sha_one="$(python tools/build_suite.py --manifest manifest.resolved.yml --out dist $args)"
+          mv dist/*.tar.gz /tmp/first.tar.gz
+          # shellcheck disable=SC2086
+          sha_two="$(python tools/build_suite.py --manifest manifest.resolved.yml --out dist $args)"
+
+          if [ "$sha_one" != "$sha_two" ]; then
+            echo "::error::the build is not reproducible: $sha_one vs $sha_two"
+            exit 1
+          fi
+          echo "reproducible: two builds produced $sha_one"
+          echo "sha256=$sha_one" >> "$GITHUB_OUTPUT"
+          ls -la dist/
+
+      # ---------------------------------------------------------------
+      # Gate 6: the archive must be able to install itself.
+      # ---------------------------------------------------------------
+
+      - name: Rehearse the deployment against the built archive
+        working-directory: deploy-repo
+        run: |
+          set -euo pipefail
+          # GitHub runners have a user systemd session only when linger is on.
+          # If it cannot be enabled, the systemd-dependent scenarios are skipped
+          # here and remain covered by the WSL rehearsal; the rest still run.
+          sudo loginctl enable-linger "$USER" || true
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          if systemctl --user is-system-running >/dev/null 2>&1; then
+            ./tests/rehearsal/run.sh
+          else
+            echo "::warning::no user systemd session on this runner; running only the non-systemd scenarios"
+            ./tests/rehearsal/run.sh corrupt_archive missing_checksum truncated_archive \
+              path_traversal not_a_suite_archive wrong_platform legacy_layout
+          fi
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            deploy-repo/dist/*.tar.gz
+            deploy-repo/dist/*.tar.gz.sha256
+          body: |
+            ## ML Server suite ${{ github.ref_name }}
+
+            Download both files, transfer them to the office server together, then run:
+
+            ```
+            ./update.sh ml-server-suite-${{ github.ref_name }}.tar.gz
+            ```
+
+            The archive contains complete application source for every component
+            at its pinned commit. The office server needs no GitHub access; only
+            the configured internal pip mirror is used, for dependencies.
+
+            `sha256: ${{ steps.assemble.outputs.sha256 }}`
+
+            The build is reproducible: this workflow assembled the archive twice
+            and confirmed both had this checksum.
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-diagnostics
+          path: |
+            deploy-repo/manifest.resolved.yml
+            deploy-repo/requirements/
+          if-no-files-found: warn

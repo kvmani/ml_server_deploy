@@ -1,0 +1,42 @@
+# Rendered by deploy/update.sh from manifest.resolved.json. Do not edit in
+# place: the next update overwrites this file, and update.sh compares the
+# rendered text against what is installed to decide whether a daemon-reload and
+# a restart are needed at all. Change manifest.yml instead.
+#
+# Nothing here may vary with the suite version. This file deliberately records
+# only the component's own commit -- no suite version, no render timestamp --
+# because any per-release churn in the text would make update.sh consider every
+# unit changed and restart all seven services on every deployment, defeating the
+# point of shipping a single-component update.
+#
+#   service  @SERVICE_ID@
+#   commit   @COMMIT@
+
+[Unit]
+Description=@DESCRIPTION@
+Documentation=file://@ROOT@/current/RUNBOOK.md
+After=network.target
+PartOf=@TARGET@
+
+[Service]
+Type=simple
+# Paths go through the `current` symlink rather than a versioned release
+# directory, for the same reason: a versioned path would change the unit text on
+# every release. It is also safer -- a versioned WorkingDirectory can be pruned
+# out from under a long-running process.
+WorkingDirectory=@WORKDIR@
+@ENVIRONMENT@
+ExecStart=@EXECSTART@
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillMode=mixed
+
+# The applications write only under the shared/ tree, which is outside every
+# release directory and is bind-safe to keep writable.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=@SERVICE_ID@
+
+[Install]
+WantedBy=@WANTED_BY@

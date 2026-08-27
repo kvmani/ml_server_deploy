@@ -1,0 +1,224 @@
+# ML Server suite -- authored deployment manifest.
+#
+# This is the ONLY file a routine release edits: bump a component's `ref`, tag
+# the suite, and GitHub Actions does the rest.
+#
+# `commit` is deliberately empty here and mandatory in the released manifest.
+# The workflow resolves each `ref` to its exact SHA and fails the build if a tag
+# cannot be resolved, which is what makes "every release resolves to exact
+# immutable component commits" enforceable rather than aspirational.
+#
+# Ports, health endpoints and start commands below were taken from the running
+# system as documented in ml_server/docs/PRODUCTION_RELEASE_2026_08.md; confirm
+# them against inventory.sh output from the real office host before the first
+# production release.
+
+schema: ml-suite.manifest.v1
+suite_version: 0.1.0
+
+platform:
+  os_id: ubuntu
+  os_version_min: "22.04"
+  python_min: "3.12"
+
+runtime:
+  user: kvmani
+  # Probed in order by detect_layout(); an explicit --root always overrides.
+  root_candidates:
+    - /home/kvmani/ml_platform
+    - /opt/ml_server
+  systemd_scope: auto        # auto | user | system | none
+  unit_prefix: ml-platform-
+
+# Persistent state lives here, outside every release directory, and is never
+# touched by update.sh or rollback.sh.
+shared_dirs:
+  - data
+  - models
+  - uploads
+  - config
+  - logs
+  - tmp
+  - state
+
+# How code is put on the path.
+#
+# Only third-party DEPENDENCIES are installed into the virtual environment; the
+# application code itself is never pip-installed. Each service runs out of its
+# own release directory via PYTHONPATH, which is what makes rollback a pure
+# symlink swap plus a restart -- no reinstall, no network, no mirror needed at
+# the exact moment things are already going wrong.
+#
+# `src` below is the directory to prepend to PYTHONPATH, relative to the
+# component's directory in the release tree.
+#
+# Paths use {current}, never {release}: a versioned path would change the text of
+# every systemd unit on every release, so update.sh would restart all seven
+# services even when only one component actually changed.
+environments:
+  shared:
+    path: .venv
+    # Hydride is included here by explicit decision.  It pulls torch, opencv,
+    # transformers and albumentations into the same environment as the portal
+    # (Flask==3.0.2) and tabular_ml (numpy<3).  The release workflow runs
+    # `pip check` on the combined environment as a blocking gate; if that gate
+    # ever fails, set `env: isolated` on the hydride service below and the
+    # scripts will build it a separate venv.  No other change is required.
+    python: python3.12
+
+services:
+
+  gateway:
+    repo: kvmani/ml_server
+    ref: main
+    commit: ""
+    dir: ml_server
+    src: src
+    env: shared
+    requirements: [requirements.txt]
+    unit: ml-platform-portal.service
+    port: 5000
+    health: /health/live
+    health_deep: /health
+    start: >-
+      {venv}/bin/gunicorn --bind 127.0.0.1:{port} --workers 2 --timeout 300
+      ml_server.app.server:create_app()
+    workdir: "{current}/apps/ml_server"
+    environment:
+      # pdf_tools and tabular_ml are imported in-process by the portal, so their
+      # source trees must be on the gateway's path too.
+      PYTHONPATH: "{current}/apps/ml_server/src:{current}/apps/pdf_tools/src:{current}/apps/tabular_ml/src"
+      ML_SERVER_CONFIG: "{root}/shared/config/config.intranet.json"
+      APP_FEEDBACK__DATABASE_PATH: "{root}/shared/data/engagement.sqlite3"
+      APP_ANALYTICS__ENABLED: "true"
+    shared_links:
+      data: shared/data
+      logs: shared/logs
+      tmp: shared/tmp
+    tests: "python -m pytest -q"
+    # The portal is the gateway; these are the paths it must be able to reach.
+    gateway_checks:
+      - /api/catalog
+      - /pdf_tools/
+      - /tabular_ml/
+      - /static/vendor/mathjax/tex-chtml-full.js
+
+  pytex:
+    repo: kvmani/pytex
+    ref: main
+    commit: ""
+    dir: pytex
+    src: src
+    env: shared
+    requirements: []
+    unit: ml-platform-pytex.service
+    port: 8765
+    health: /api/health
+    start: "{venv}/bin/python -m pytex.app serve --host 127.0.0.1 --port {port}"
+    workdir: "{current}/apps/pytex"
+    environment:
+      PYTHONPATH: "{current}/apps/pytex/src"
+    tests: "python -m pytest -q -x"
+
+  calculator:
+    repo: kvmani/scientific_calculator
+    ref: main
+    commit: ""
+    dir: scientific_calculator
+    src: src
+    env: shared
+    requirements: [requirements.txt]
+    unit: ml-platform-calculator.service
+    port: 5055
+    health: /api/health
+    start: "{venv}/bin/python app.py"
+    workdir: "{current}/apps/scientific_calculator"
+    environment:
+      PYTHONPATH: "{current}/apps/scientific_calculator/src"
+    tests: "python -m pytest -q"
+
+  converter:
+    repo: kvmani/unit_converter
+    ref: main
+    commit: ""
+    dir: unit_converter
+    src: src
+    env: shared
+    requirements: [requirements.txt]
+    unit: ml-platform-converter.service
+    port: 5065
+    health: /api/health
+    start: "{venv}/bin/python app.py"
+    workdir: "{current}/apps/unit_converter"
+    environment:
+      PYTHONPATH: "{current}/apps/unit_converter/src"
+    tests: "python -m pytest -q"
+
+  # pdf_tools and tabular_ml are mounted in-process by the gateway rather than
+  # run as their own services, so they have no unit and no port of their own.
+  pdf_tools:
+    repo: kvmani/pdf_tools
+    ref: main
+    commit: ""
+    dir: pdf_tools
+    src: src
+    env: shared
+    requirements: []
+    in_process: true
+    mount: /pdf_tools/
+    health: /pdf_tools/health
+    via: gateway
+
+  tabular_ml:
+    repo: kvmani/tabular_ml
+    ref: main
+    commit: ""
+    dir: tabular_ml
+    src: src
+    env: shared
+    requirements: []
+    in_process: true
+    mount: /tabular_ml/
+    health: /tabular_ml/api/v1/health
+    via: gateway
+    npm_build:
+      dir: frontend
+      command: "npm ci && npm run build"
+      output: dist
+    tests: "python -m pytest -q"
+
+  hydride:
+    # Note the different GitHub owner; the release workflow needs a token with
+    # read access if this repository is private.
+    repo: Pushpalathadevi/HydrideSegmentation
+    ref: main
+    commit: ""
+    # Flat package at the repository root, not a src/ layout like the others.
+    dir: HydrideSegmentation
+    src: "."
+    env: shared                        # flip to `isolated` if the pip-check gate fails
+    requirements: [requirements-web.txt]
+    unit: ml-platform-hydride.service
+    port: 5005
+    health: /health
+    start: "{venv}/bin/python scripts/run_web_server.py --host 127.0.0.1 --port {port} --no-preload"
+    workdir: "{current}/apps/HydrideSegmentation"
+    environment:
+      PYTHONPATH: "{current}/apps/HydrideSegmentation"
+    # The trained checkpoints are NOT in git (frozen_checkpoints/ holds only
+    # .gitkeep files), so they can never travel in the release archive.  They
+    # live in shared/models and are supplied to the server out of band, once.
+    shared_links:
+      frozen_checkpoints: shared/models/hydride
+    requires_models: true
+
+# Packages that must be installable from the office mirrors.  The release
+# workflow writes the fully resolved list to requirements/mirror_audit.txt; this
+# section only records the non-obvious ones worth checking with IT in advance.
+mirror_notes:
+  - "torch and torchvision must come from a CPU-only index; the default wheels
+     bundle the CUDA runtime and add several GB for no benefit on this host."
+  - "poppler-utils (apt) provides pdftoppm, required by pdf2image for previews."
+  - "The gateway's requirements.txt resolves pdf_tools and tabular_ml from
+     GitHub archive URLs; build_suite.py rewrites those to local paths, because
+     an air-gapped host cannot fetch them."

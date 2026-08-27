@@ -1,0 +1,30 @@
+# The office server is Ubuntu; development is Windows. A shell script or systemd
+# unit checked out with CRLF fails on Ubuntu with the near-undebuggable
+# `bad interpreter: /bin/bash^M`. These rules make that impossible rather than
+# merely unlikely, and tools/check_text_hygiene.py enforces them in CI.
+#
+# The catch-all comes first and deliberately covers everything, including files
+# with no extension and extensions nobody thought to list. An earlier version of
+# this file enumerated suffixes and silently missed .gitignore and
+# systemd/service.template, both of which git was about to rewrite to CRLF.
+* text=auto eol=lf
+
+# Listed explicitly as well, so the intent survives an edit to the line above.
+*.sh            text eol=lf
+*.bats          text eol=lf
+*.service       text eol=lf
+*.service.in    text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+*.py            text eol=lf
+*.md            text eol=lf
+*.txt           text eol=lf
+VERSION         text eol=lf
+.gitattributes  text eol=lf
+
+# Release archives are built by GitHub Actions on Linux and are never to be
+# rebuilt or re-committed from Windows.
+*.tar.gz        binary
+*.sha256        text eol=lf
+*.template     text eol=lf
+.gitignore     text eol=lf
