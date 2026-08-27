@@ -105,9 +105,13 @@ MEMBERS="$(tar -tzf "$ARCHIVE")" || die "archive is not a readable gzip tar (tru
 
 while IFS= read -r member; do
     case "$member" in
-        /*)     die "unsafe archive: member has an absolute path: ${member}" ;;
-        *../*)  die "unsafe archive: member escapes the archive root: ${member}" ;;
-        ../*)   die "unsafe archive: member escapes the archive root: ${member}" ;;
+        /*) die "unsafe archive: member has an absolute path: ${member}" ;;
+    esac
+    # Wrapping in slashes lets one pattern catch a leading `../`, an embedded
+    # `/../` and a trailing `/..`, while still accepting an ordinary filename
+    # that merely contains two dots, such as `notes..txt`.
+    case "/${member}/" in
+        */../*) die "unsafe archive: member escapes the archive root: ${member}" ;;
     esac
 done <<<"$MEMBERS"
 
@@ -194,7 +198,8 @@ on_cleanup "rm -f '${PREFLIGHT_LOG}'"
 promote_log() {
     local dir="${ML_ROOT}/shared/logs"
     mkdir -p "$dir" || return 0
-    local target="${dir}/update-${TARGET_VERSION}-$(date -u '+%Y%m%dT%H%M%SZ').log"
+    local target
+    target="${dir}/update-${TARGET_VERSION}-$(date -u '+%Y%m%dT%H%M%SZ').log"
     cp "$PREFLIGHT_LOG" "$target" 2>/dev/null || return 0
     ML_LOG_FILE="$target"
     log "log file: ${ML_LOG_FILE}"
@@ -317,7 +322,7 @@ done < <(service_ids)
 # A change to anything mounted in-process is a change to the gateway process.
 for id in "${CHANGED_SERVICES[@]}"; do
     if [[ "$(svc "$id" via '')" == "gateway" ]]; then
-        if [[ ! " ${CHANGED_SERVICES[*]} " =~ " gateway " ]]; then
+        if [[ " ${CHANGED_SERVICES[*]} " != *" gateway "* ]]; then
             CHANGED_SERVICES+=("gateway")
             log "gateway will also restart because in-process component '${id}' changed"
         fi
@@ -632,7 +637,7 @@ while read -r id; do
         UNITS_CHANGED=1
         log "  ${unit}: installed"
         # A unit whose text changed must restart even if its code did not.
-        if [[ ! " ${CHANGED_SERVICES[*]} " =~ " ${id} " ]]; then
+        if [[ " ${CHANGED_SERVICES[*]} " != *" ${id} "* ]]; then
             CHANGED_SERVICES+=("$id")
         fi
     fi

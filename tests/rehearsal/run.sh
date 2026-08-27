@@ -196,8 +196,6 @@ build_archive() {
 # A disposable office server
 # ---------------------------------------------------------------------------
 
-CURRENT_ROOT=""
-
 new_root() {
     # new_root <scenario-name>  -> echoes a fresh empty root
     local name="$1"
@@ -205,7 +203,6 @@ new_root() {
     stop_units
     rm -rf "$root"
     mkdir -p "$root"
-    CURRENT_ROOT="$root"
     echo "$root"
 }
 
@@ -285,7 +282,7 @@ scenario_upgrade_all() {
 scenario_single_component() {
     # The headline requirement: change one repository, rebuild, deploy, and
     # confirm the other applications were not restarted.
-    local root a1 a2 before_pids after_pids
+    local root a1 a2
     root="$(new_root single_component)"
     a1="$(build_archive 1.0.0)" || return 1
 
@@ -324,9 +321,9 @@ MUTATOR
     assert_eq "active version is 1.0.1" "1.0.1" "$(active_version "$root")"
 
     local restarted=0 untouched=0
-    for unit in ml-platform-pytex; do
-        [[ "$(unit_pid "${unit}.service")" != "${pid_before[$unit]}" ]] && restarted=1
-    done
+    if [[ "$(unit_pid ml-platform-pytex.service)" != "${pid_before[ml-platform-pytex]}" ]]; then
+        restarted=1
+    fi
     assert_eq "pytex was restarted" "1" "$restarted"
 
     for unit in ml-platform-calculator ml-platform-converter ml-platform-hydride; do

@@ -107,8 +107,13 @@ jobs:
               directory = service.get("dir", name)
               print(f'echo "::group::{name} {repo}@{commit}"')
               print(f'git init -q "../components/{directory}"')
+              # Deliberately no braces around the variable. GitHub Actions scans
+              # the whole workflow file for ${{ ... }} expressions, including
+              # inside run: blocks, so an f-string that emits those two braces
+              # makes Actions try to evaluate GITHUB_TOKEN as a context and
+              # reject the entire workflow before any job starts.
               print(f'git -C "../components/{directory}" remote add origin '
-                    f'"https://x-access-token:${{GITHUB_TOKEN}}@github.com/{repo}.git"')
+                    f'"https://x-access-token:$GITHUB_TOKEN@github.com/{repo}.git"')
               # Fetching the single pinned commit avoids cloning history we do
               # not ship and makes an unreachable pin fail loudly here.
               print(f'git -C "../components/{directory}" fetch -q --depth 1 origin {commit}')

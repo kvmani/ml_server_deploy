@@ -72,7 +72,8 @@ log_init() {
         warn "cannot create log dir ${dir}; logging to stderr only"
         return 0
     fi
-    local candidate="${dir}/${name}-$(date -u '+%Y%m%dT%H%M%SZ').log"
+    local candidate
+    candidate="${dir}/${name}-$(date -u '+%Y%m%dT%H%M%SZ').log"
     if : >"$candidate" 2>/dev/null; then
         ML_LOG_FILE="$candidate"
         log "log file: ${ML_LOG_FILE}"
