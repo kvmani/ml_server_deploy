@@ -108,10 +108,13 @@ jobs:
               print(f'echo "::group::{name} {repo}@{commit}"')
               print(f'git init -q "../components/{directory}"')
               # Deliberately no braces around the variable. GitHub Actions scans
-              # the whole workflow file for ${{ ... }} expressions, including
-              # inside run: blocks, so an f-string that emits those two braces
-              # makes Actions try to evaluate GITHUB_TOKEN as a context and
-              # reject the entire workflow before any job starts.
+              # the entire workflow file for its own expression syntax (a dollar
+              # sign followed by two braces), including inside run: blocks, so
+              # emitting that sequence here would make Actions try to evaluate
+              # GITHUB_TOKEN as a context and reject the whole workflow before
+              # any job starts. Note that this comment must avoid writing the
+              # sequence out for exactly the same reason -- an earlier version
+              # of this comment did, and broke the workflow it was explaining.
               print(f'git -C "../components/{directory}" remote add origin '
                     f'"https://x-access-token:$GITHUB_TOKEN@github.com/{repo}.git"')
               # Fetching the single pinned commit avoids cloning history we do
@@ -131,7 +134,6 @@ jobs:
         continue-on-error: false
         run: |
           set -uo pipefail
-          failed=""
           python - <<'PY' > ../tests.sh
           import yaml
           with open("manifest.resolved.yml", encoding="utf-8") as handle:
@@ -279,7 +281,8 @@ jobs:
           # If it cannot be enabled, the systemd-dependent scenarios are skipped
           # here and remain covered by the WSL rehearsal; the rest still run.
           sudo loginctl enable-linger "$USER" || true
-          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export XDG_RUNTIME_DIR
           if systemctl --user is-system-running >/dev/null 2>&1; then
             ./tests/rehearsal/run.sh
           else
