@@ -24,6 +24,13 @@ FIXTURES="${REHEARSAL_HOME}/fixtures"
 DIST="${REHEARSAL_HOME}/dist"
 SHIMS="${REHEARSAL_HOME}/shims"
 WORK="${REHEARSAL_HOME}/work"
+# The rehearsal ships its own requirements directory rather than whatever the
+# repository happens to contain. A release build writes the real 105-package
+# resolved.txt into requirements/, and a fixture archive built afterwards
+# inherited it, then tried to install torch with the network deliberately
+# blocked. An empty resolved.txt still exercises update.sh's install path and
+# needs no network to do it.
+FIXTURE_REQS="${REHEARSAL_HOME}/fixture-requirements"
 
 PASSED=0
 FAILED=0
@@ -186,6 +193,7 @@ build_archive() {
 
     ( cd "$REPO_ROOT" && python3 tools/build_suite.py \
         --manifest "${fixture_dir}/manifest.fixture.yml" \
+        --requirements "$FIXTURE_REQS" \
         --out "$DIST" --allow-unresolved "${args[@]}" ) >/dev/null 2>&1 \
         || { fail "could not build archive ${version}"; return 1; }
 
@@ -797,7 +805,11 @@ main() {
         exit 1
     fi
 
-    mkdir -p "$FIXTURES" "$DIST" "$WORK" "$SHIMS"
+    mkdir -p "$FIXTURES" "$DIST" "$WORK" "$SHIMS" "$FIXTURE_REQS"
+    printf '# Rehearsal fixture: the stub services need no third-party packages.\n' \
+        >"${FIXTURE_REQS}/resolved.txt"
+    printf '# Rehearsal fixture: nothing to mirror.\n' \
+        >"${FIXTURE_REQS}/mirror_audit.txt"
     export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
     banner "ML Server suite -- deployment rehearsal"

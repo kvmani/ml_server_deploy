@@ -250,7 +250,7 @@ def build_archive(staging: Path, prefix: str, out_path: Path, mtime: int) -> str
 
 
 def assemble(manifest: dict[str, Any], sources: dict[str, Path], staging: Path,
-             deploy_root: Path) -> list[str]:
+             deploy_root: Path, requirements_dir: Path | None = None) -> list[str]:
     staging.mkdir(parents=True, exist_ok=True)
     notes: list[str] = []
 
@@ -274,8 +274,14 @@ def assemble(manifest: dict[str, Any], sources: dict[str, Path], staging: Path,
     # manifest they were built against.
     shutil.copytree(deploy_root / "deploy", staging / "deploy", ignore=_ignore)
     shutil.copytree(deploy_root / "systemd", staging / "systemd", ignore=_ignore)
-    if (deploy_root / "requirements").is_dir():
-        shutil.copytree(deploy_root / "requirements", staging / "requirements", ignore=_ignore)
+    # Which requirements directory ships is explicit rather than implicit.
+    # It used to be whatever happened to be in the repository, which meant a
+    # rehearsal archive built after the dependency gate silently inherited the
+    # real 105-package resolved.txt and then tried to install torch with the
+    # network deliberately blocked. Rehearsals now pass their own directory.
+    source_requirements = requirements_dir or (deploy_root / "requirements")
+    if source_requirements.is_dir():
+        shutil.copytree(source_requirements, staging / "requirements", ignore=_ignore)
     else:
         (staging / "requirements").mkdir()
 
@@ -311,6 +317,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--staging", type=Path, help="keep the staging tree here for inspection")
     parser.add_argument("--allow-unresolved", action="store_true",
                         help="permit empty commit SHAs (rehearsal builds only)")
+    parser.add_argument("--requirements", type=Path,
+                        help="directory to ship as requirements/ (default: the repository's)")
     parser.add_argument("--mtime", type=int, default=0, help="fixed mtime for reproducibility")
     args = parser.parse_args(argv)
 
@@ -354,7 +362,7 @@ def main(argv: list[str] | None = None) -> int:
             shutil.rmtree(staging_root)
 
         print(f"assembling suite {version}", file=sys.stderr)
-        notes = assemble(document, sources, staging_root, REPO_ROOT)
+        notes = assemble(document, sources, staging_root, REPO_ROOT, args.requirements)
         for note in notes:
             print(f"  {note}", file=sys.stderr)
 
