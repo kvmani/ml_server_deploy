@@ -183,7 +183,7 @@ jobs:
             --venv ../depcheck \
             --out requirements 2>&1 | tee /tmp/gate.log || rc=$?
           if [ "$rc" != "0" ]; then
-            echo "::error title=Dependency gate output::$(tail -40 /tmp/gate.log | sed ':a;N;$!ba;s/\n/%0A/g')"
+            echo "::error title=Dependency gate output::$(tail -c 3000 /tmp/gate.log | sed ':a;N;$!ba;s/\n/%0A/g')"
             exit "$rc"
           fi
 

@@ -174,6 +174,16 @@ def main() -> int:
     parser.add_argument("--skip-install", action="store_true", help="reuse an existing venv")
     args = parser.parse_args()
 
+    # Every path is made absolute up front. The import probes and the component
+    # test runs both use cwd=<component directory>, and a relative interpreter
+    # or component path would then be resolved against that directory instead of
+    # the one the caller meant. The release workflow passes `--venv ../depcheck`,
+    # which failed in exactly this way while absolute paths worked locally.
+    args.manifest = args.manifest.resolve()
+    args.components = args.components.resolve()
+    args.venv = args.venv.resolve()
+    args.out = args.out.resolve()
+
     try:
         with args.manifest.open(encoding="utf-8") as handle:
             document = yaml.safe_load(handle)
@@ -269,8 +279,6 @@ def main() -> int:
             else:
                 path_value = str((directory / service.get("src", "src")).resolve())
 
-            import os
-
             probe = subprocess.run(
                 [str(python), "-c", f"import {module}; print({module}.__name__)"],
                 cwd=directory, env={**os.environ, "PYTHONPATH": path_value},
@@ -315,8 +323,6 @@ def main() -> int:
                     run([str(python), "-m", "pip", "install", *extras], stdout=subprocess.DEVNULL)
 
                 print(f"\n-- {name}: {command}")
-                import os
-
                 # Use the PYTHONPATH the deployed unit will actually have,
                 # translated from the manifest. The gateway imports pdf_tools
                 # and tabular_ml in-process, so testing it with only its own
