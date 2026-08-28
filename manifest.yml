@@ -14,7 +14,7 @@
 # production release.
 
 schema: ml-suite.manifest.v1
-suite_version: 1.0.2
+suite_version: 1.0.3
 
 platform:
   os_id: ubuntu
@@ -64,6 +64,31 @@ shared_dirs:
 # added a quarter of an hour to every build, while telling us nothing about
 # whether the suite would deploy. Each component repository owns its own CI.
 # Pass --run-component-tests to tools/dependency_gate.py to run them by hand.
+
+# System packages the deployment needs but will never install for you.
+#
+# Installing OS packages is the operator's job: it needs root, it comes from the
+# office's own apt mirror, and a deployment script silently changing the system
+# is not something anyone wants to debug later. Preflight checks for all of them
+# at once and, if any are missing, stops before changing anything and prints the
+# exact command to install them. Fix them all in one go, then re-run.
+system_requirements:
+  - command: sqlite3
+    package: sqlite3
+    why: >-
+      Taking a consistent backup of the engagement database before an upgrade.
+      Without it the backup falls back to cp, which can copy a torn file from a
+      live write-ahead log and produce a backup that only looks valid.
+  - command: pdftoppm
+    package: poppler-utils
+    why: >-
+      PDF page previews in the PDF Tools workbench; pdf2image shells out to this
+      binary, so previews fail at runtime without it.
+  - command: ss
+    package: iproute2
+    why: >-
+      Detecting whether a service port is already in use, which is how a clash
+      with another application is caught before anything is deployed.
 
 # Extra package indexes needed to install the pinned set.
 #
@@ -246,9 +271,9 @@ services:
     # Note the different GitHub owner; the release workflow needs a token with
     # read access if this repository is private.
     repo: Pushpalathadevi/HydrideSegmentation
-    # Pinned by commit rather than tag: this repository belongs to another
-    # owner, so we do not create tags in it. A SHA is equally reproducible.
-    ref: 5c42c207f220952da22d6c57ac1ce93a35f97f91
+    # Tagged v1.0.1 in that repository with the owner's authorisation, so this
+    # is pinned the same way as every other component.
+    ref: v1.0.1
     commit: ""
     # Flat package at the repository root, not a src/ layout like the others.
     dir: HydrideSegmentation

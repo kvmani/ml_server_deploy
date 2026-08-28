@@ -113,6 +113,37 @@ systemctl --user status  ml-platform-pytex.service
 
 ---
 
+## Prerequisites: let the script tell you
+
+Do not try to work out in advance what this host needs. Run the update and let
+preflight tell you — it checks everything and reports **all** of it at once,
+before changing anything:
+
+```
+This host is missing 2 prerequisite(s). NOTHING HAS BEEN CHANGED.
+
+  * sqlite3 (apt: sqlite3) -- Taking a consistent backup of the engagement
+    database before an upgrade. Without it the backup falls back to cp, which
+    can copy a torn file from a live write-ahead log...
+  * pdftoppm (apt: poppler-utils) -- PDF page previews in the PDF Tools
+    workbench; pdf2image shells out to this binary...
+
+Install the system packages from your internal apt mirror:
+    sudo apt-get install -y sqlite3 poppler-utils
+
+Then run this same command again.
+```
+
+Install what it names, from your internal mirrors, and re-run the same command.
+Nothing was changed in the meantime, so there is no half-finished state to
+clean up and no need to start over.
+
+Two kinds of prerequisite are reported this way, and neither is ever installed
+for you:
+
+- **System packages** — they need root and come from your apt mirror.
+- **Hand-installed python packages** (`torch`, `torchvision`) — see below.
+
 ## First-time setup on a new machine
 
 Only needed once, and only if the suite has never been installed here.
@@ -121,11 +152,7 @@ Only needed once, and only if the suite has never been installed here.
 # Services must survive logout.
 loginctl enable-linger kvmani
 
-# Confirm the essentials are present.
-python3 --version          # must be 3.12 or newer
-cat /etc/pip.conf          # must point at the internal mirror
-
-# Then deploy as normal.
+# Then just run the update; it will tell you what else is missing.
 ./update.sh /path/to/ml-server-suite-vX.Y.Z.tar.gz
 ```
 

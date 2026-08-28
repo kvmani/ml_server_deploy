@@ -714,6 +714,51 @@ scenario_legacy_layout() {
     assert_no_mutation "the legacy installation was not touched" "$fake_legacy" "$before"
 }
 
+scenario_missing_prerequisite() {
+    # A prerequisite the operator must install by hand must stop the deployment
+    # in preflight, name what is missing and how to install it, and change
+    # nothing at all -- so the fix can be applied and the same command re-run.
+    local root archive before
+    root="$(new_root missing_prerequisite)"
+
+    cat >"${WORK}/needs_tool.py" <<'MUTATOR'
+import sys
+import yaml
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    document = yaml.safe_load(handle)
+document["system_requirements"] = [
+    {
+        "command": "definitely-not-installed-anywhere",
+        "package": "some-office-package",
+        "why": "a tool the deployment needs and will not install for you",
+    }
+]
+with open(path, "w", encoding="utf-8", newline="\n") as handle:
+    yaml.safe_dump(document, handle, sort_keys=False, default_flow_style=False)
+MUTATOR
+
+    archive="$(build_archive 1.4.0 "${WORK}/needs_tool.py")" || return 1
+
+    before="$(fingerprint "$root")"
+    local output rc=0
+    output="$(update "$root" "$archive" 2>&1)" || rc=$?
+
+    assert "a missing prerequisite is refused" test "$rc" -ne 0
+    assert_contains "it says nothing was changed" "$output" "NOTHING HAS BEEN CHANGED"
+    assert_contains "it names the missing tool" "$output" "definitely-not-installed-anywhere"
+    assert_contains "it gives the apt command to fix it" "$output" "sudo apt-get install -y some-office-package"
+    assert_no_mutation "the server really is unchanged" "$root" "$before"
+
+    # And once the requirement is satisfiable, the same archive deploys.
+    mkdir -p "${SHIMS}"
+    printf '#!/usr/bin/env bash\nexit 0\n' >"${SHIMS}/definitely-not-installed-anywhere"
+    chmod +x "${SHIMS}/definitely-not-installed-anywhere"
+    assert "the same archive deploys once the prerequisite is present" update "$root" "$archive"
+    rm -f "${SHIMS}/definitely-not-installed-anywhere"
+}
+
 scenario_dry_run() {
     local root archive before
     root="$(new_root dry_run)"
@@ -756,6 +801,7 @@ SCENARIOS=(
     data_survives
     rollback_bad_release
     manual_rollback
+    missing_prerequisite
     dry_run
     corrupt_archive
     missing_checksum

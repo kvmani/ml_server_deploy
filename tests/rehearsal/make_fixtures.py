@@ -175,6 +175,12 @@ def build(out_dir: Path, version: str) -> Path:
     # keeps the offline scenarios genuinely offline.
     manifest["pip"] = {"extra_index_urls": [], "preinstalled": []}
 
+    # Likewise the system packages: the stubs need none, and requiring sqlite3
+    # or poppler here would make the rehearsal depend on what happens to be
+    # installed on the developer's machine. The missing_prerequisite scenario
+    # puts a requirement back deliberately to test the refusal path.
+    manifest["system_requirements"] = []
+
     if out_dir.exists():
         shutil.rmtree(out_dir)
     sources = out_dir / "sources"

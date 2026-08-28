@@ -286,10 +286,17 @@ elif [[ "$ML_SYSTEMD_SCOPE" == "system" ]]; then
     have_sudo || die "systemd scope is 'system' but passwordless sudo is unavailable"
 fi
 
-# --- A9b. packages that must already be present ----------------------------
+# --- A9b. prerequisites this script will not install for you ---------------
 #
-# Checked here, in preflight, so a missing torch stops the deployment before a
-# single byte is written rather than half way through the dependency install.
+# Everything that needs a manual install is detected here, in preflight, and
+# reported together. A deployment that stops one missing package at a time,
+# during a maintenance window, is a bad experience; this collects the system
+# packages and the hand-installed python packages in one pass and prints a
+# single list with the commands to fix all of them.
+
+step "A9b. checking prerequisites"
+
+check_system_requirements
 
 PREINSTALLED=()
 while read -r package; do
@@ -303,14 +310,17 @@ if (( ${#PREINSTALLED[@]} )); then
         STAGE_RESOLVED="$(mktemp)"
         on_cleanup "rm -f '${STAGE_RESOLVED}'"
         tar -xzOf "$ARCHIVE" "${ARCHIVE_PREFIX}/requirements/resolved.txt" >"$STAGE_RESOLVED" 2>/dev/null || true
-        check_preinstalled "${ML_VENV}/bin/python" "$STAGE_RESOLVED" "${PREINSTALLED[@]}" \
-            || die "cannot proceed until the package(s) above are installed"
+        check_preinstalled "${ML_VENV}/bin/python" "$STAGE_RESOLVED" "${PREINSTALLED[@]}"
     else
         warn "the environment ${ML_VENV} does not exist yet and will be created"
-        warn "these package(s) must be installed into it by hand: ${PREINSTALLED[*]}"
-        warn "the deployment will stop and tell you so if they are still missing"
+        warn "these package(s) must then be installed into it by hand: ${PREINSTALLED[*]}"
+        warn "the deployment will stop and say so if they are still missing"
     fi
 fi
+
+report_missing_prerequisites "${ML_VENV}/bin/python" \
+    || die "cannot proceed until the prerequisites above are installed"
+ok "all prerequisites present"
 
 # --- A10. the plan ---------------------------------------------------------
 
@@ -584,8 +594,12 @@ else
     # packages put into it before anything can run. Say so now, clearly, rather
     # than letting the services fail to start later.
     if (( ${#PREINSTALLED[@]} )); then
+        # Re-checked against the environment as it now exists: preflight may
+        # have run before the venv was created.
+        reset_prerequisite_state
         check_preinstalled "${ML_VENV}/bin/python" "${TARGET_RELEASE}/requirements/resolved.txt" \
-            "${PREINSTALLED[@]}" \
+            "${PREINSTALLED[@]}"
+        report_missing_prerequisites "${ML_VENV}/bin/python" \
             || fail_and_rollback "required pre-installed package(s) are missing from ${ML_VENV}"
     fi
 

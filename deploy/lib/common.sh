@@ -553,18 +553,56 @@ except Exception:
 PYEOF
 }
 
+# Prerequisites are accumulated across every check and reported together. Being
+# told about one missing package, installing it, re-running and being told about
+# the next is a miserable way to bring up a server that you can only reach
+# during a maintenance window.
+ML_MISSING_APT=()        # apt package names
+ML_MISSING_PYTHON=()     # python distribution names
+ML_MISSING_NOTES=()      # human-readable "name -- why" lines
+
+reset_prerequisite_state() {
+    ML_MISSING_APT=()
+    ML_MISSING_PYTHON=()
+    ML_MISSING_NOTES=()
+}
+
+# check_system_requirements — reads system_requirements from the manifest.
+check_system_requirements() {
+    local command_name package reason
+    while IFS=$'\t' read -r command_name package reason; do
+        [[ -n "$command_name" ]] || continue
+        if have_cmd "$command_name"; then
+            log "system requirement ${command_name} present"
+        else
+            ML_MISSING_APT+=("$package")
+            ML_MISSING_NOTES+=("${command_name} (apt: ${package}) -- ${reason}")
+        fi
+    done < <(python3 - "$ML_MANIFEST" <<'PYEOF'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    document = json.load(handle)
+for entry in document.get("system_requirements") or []:
+    reason = " ".join((entry.get("why") or "").split())
+    print(f"{entry.get('command', '')}\t{entry.get('package', '')}\t{reason}")
+PYEOF
+)
+}
+
 # check_preinstalled <venv-python> <resolved-requirements-or-empty> <pkg...>
-# Returns 1 and explains itself if any named package is absent.
 check_preinstalled() {
     local python_bin="$1" resolved="$2"
     shift 2
-    local missing=() package found pinned
+    local package found pinned
 
     for package in "$@"; do
         [[ -n "$package" ]] || continue
         found="$(installed_version "$python_bin" "$package")"
         if [[ -z "$found" ]]; then
-            missing+=("$package")
+            ML_MISSING_PYTHON+=("$package")
+            ML_MISSING_NOTES+=("${package} (python package, into ${python_bin%/bin/python}) -- installed by hand because its wheels are large and not on the normal mirror")
             continue
         fi
         ok "pre-installed ${package} ${found} found in the environment"
@@ -579,27 +617,40 @@ check_preinstalled() {
             fi
         fi
     done
+}
 
-    if (( ${#missing[@]} )); then
-        err "required package(s) are not installed in the deployment environment:"
-        local item
-        for item in "${missing[@]}"; do
-            err "    ${item}"
-        done
+# report_missing_prerequisites <venv-python>
+# Returns 1 if anything is missing, after printing one consolidated report.
+report_missing_prerequisites() {
+    local python_bin="$1"
+    local total=$(( ${#ML_MISSING_APT[@]} + ${#ML_MISSING_PYTHON[@]} ))
+    (( total == 0 )) && return 0
+
+    err ""
+    err "This host is missing ${total} prerequisite(s). NOTHING HAS BEEN CHANGED."
+    err ""
+    err "These are never installed automatically: system packages need root and"
+    err "come from your own apt mirror, and the python packages listed here were"
+    err "installed by hand for good reasons. Install them, then re-run this update."
+    err ""
+    local note
+    for note in "${ML_MISSING_NOTES[@]}"; do
+        err "  * ${note}"
+    done
+    err ""
+    if (( ${#ML_MISSING_APT[@]} )); then
+        err "Install the system packages from your internal apt mirror:"
+        err "    sudo apt-get install -y ${ML_MISSING_APT[*]}"
         err ""
-        err "environment: ${python_bin%/bin/python}"
-        err ""
-        err "These are deliberately never installed or upgraded by this script:"
-        err "their wheels are large, are not served by the normal package mirror,"
-        err "and are expected to be installed once, by hand, on this host."
-        err ""
-        err "Install them offline into that environment, for example:"
-        err "    ${python_bin} -m pip install --no-index --find-links /path/to/wheels ${missing[*]}"
-        err ""
-        err "then re-run this update. Nothing has been changed."
-        return 1
     fi
-    return 0
+    if (( ${#ML_MISSING_PYTHON[@]} )); then
+        err "Install the python packages offline into the deployment environment:"
+        err "    ${python_bin} -m pip install --no-index \\"
+        err "        --find-links /path/to/wheels ${ML_MISSING_PYTHON[*]}"
+        err ""
+    fi
+    err "Then run this same command again."
+    return 1
 }
 
 http_status() {
