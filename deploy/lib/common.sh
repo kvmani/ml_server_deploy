@@ -653,6 +653,65 @@ report_missing_prerequisites() {
     return 1
 }
 
+# ---------------------------------------------------------------------------
+# Unit ownership
+#
+# Unit names come from the manifest, so two deployments on the same host -- a
+# staging root alongside production, say -- want the same unit files. Installing
+# one takes the units away from the other. That is allowed, but it must never be
+# a surprise, so it is detected and announced before anything is written.
+# ---------------------------------------------------------------------------
+
+ML_TAKEOVER_UNITS=()   # "unit<TAB>other-root" for units belonging elsewhere
+
+# unit_deployment_root <unit-file> -- prints the root the unit currently serves
+unit_deployment_root() {
+    local unit_file="$1" workdir
+    [[ -f "$unit_file" ]] || return 0
+    workdir="$(sed -n 's/^WorkingDirectory=\(.*\)$/\1/p' "$unit_file" | head -1)"
+    [[ -n "$workdir" ]] || return 0
+    # WorkingDirectory is <root>/current/apps/<component>
+    printf '%s' "${workdir%%/current/*}"
+}
+
+# check_unit_takeover <unit-dir> <this-root> <unit...>
+check_unit_takeover() {
+    local unit_dir="$1" this_root="$2"
+    shift 2
+    ML_TAKEOVER_UNITS=()
+    local unit other
+
+    for unit in "$@"; do
+        [[ -n "$unit" ]] || continue
+        other="$(unit_deployment_root "${unit_dir}/${unit}")"
+        if [[ -n "$other" && "$other" != "$this_root" ]]; then
+            ML_TAKEOVER_UNITS+=("${unit}"$'\t'"${other}")
+        fi
+    done
+
+    (( ${#ML_TAKEOVER_UNITS[@]} )) || return 0
+
+    local entry name root
+    warn ""
+    warn "TAKING OVER ${#ML_TAKEOVER_UNITS[@]} SERVICE(S) FROM ANOTHER DEPLOYMENT"
+    warn ""
+    for entry in "${ML_TAKEOVER_UNITS[@]}"; do
+        name="${entry%%$'\t'*}"
+        root="${entry##*$'\t'}"
+        warn "    ${name}"
+        warn "        currently serving: ${root}"
+    done
+    warn ""
+    warn "These units will be stopped, their unit files overwritten, and restarted"
+    warn "against this deployment (${this_root}). The other deployment's files stay"
+    warn "on disk but will no longer be served by systemd."
+    warn ""
+    warn "If that is not what you want, re-run with --root ${root} to update the"
+    warn "existing deployment in place instead."
+    warn ""
+    return 0
+}
+
 http_status() {
     # http_status <url> [timeout-seconds] -- prints 000 when unreachable.
     # curl already prints 000 on a connection failure AND exits non-zero, so the

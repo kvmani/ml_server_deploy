@@ -14,7 +14,7 @@
 # production release.
 
 schema: ml-suite.manifest.v1
-suite_version: 1.0.3
+suite_version: 1.0.4
 
 platform:
   os_id: ubuntu

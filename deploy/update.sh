@@ -322,6 +322,23 @@ report_missing_prerequisites "${ML_VENV}/bin/python" \
     || die "cannot proceed until the prerequisites above are installed"
 ok "all prerequisites present"
 
+# --- A9c. units already owned by another deployment ------------------------
+#
+# Unit names come from the manifest, so deploying a second root on the same host
+# claims the same units. That is permitted, but it stops the other deployment's
+# services, so it is announced here rather than happening silently.
+
+ALL_UNITS=()
+while read -r id; do
+    [[ "$(svc "$id" in_process false)" == "true" ]] && continue
+    unit="$(svc "$id" unit)"
+    [[ -n "$unit" ]] && ALL_UNITS+=("$unit")
+done < <(service_ids)
+
+if (( ${#ALL_UNITS[@]} )); then
+    check_unit_takeover "$(unit_dir)" "$ML_ROOT" "${ALL_UNITS[@]}"
+fi
+
 # --- A10. the plan ---------------------------------------------------------
 
 CHANGED_SERVICES=()
@@ -383,6 +400,16 @@ elif (( ${#CHANGED_SERVICES[@]} == 0 )); then
 else
     say "  Services to restart: ${CHANGED_SERVICES[*]}"
 fi
+if (( ${#ML_TAKEOVER_UNITS[@]} )); then
+    say ""
+    say "  !! TAKING OVER ${#ML_TAKEOVER_UNITS[@]} service(s) from another deployment:"
+    for entry in "${ML_TAKEOVER_UNITS[@]}"; do
+        say "       ${entry%%$'\t'*}   (currently serving ${entry##*$'\t'})"
+    done
+    say "     They will be stopped and restarted against this release."
+fi
+
+say ""
 say "  Persistent data in ${ML_ROOT}/shared is NOT touched by this update."
 say "==================================================================="
 say ""

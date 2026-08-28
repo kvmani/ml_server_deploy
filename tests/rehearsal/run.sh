@@ -714,6 +714,42 @@ scenario_legacy_layout() {
     assert_no_mutation "the legacy installation was not touched" "$fake_legacy" "$before"
 }
 
+scenario_unit_takeover() {
+    # Two deployments on one host want the same unit names. Deploying the second
+    # takes the services away from the first. That is allowed -- but it must be
+    # announced, not silent, because it stops the other deployment.
+    local first second archive
+    archive="$(build_archive 1.0.0)" || return 1
+
+    first="${WORK}/takeover_a"
+    second="${WORK}/takeover_b"
+    stop_units
+    rm -rf "$first" "$second"
+    mkdir -p "$first" "$second"
+
+    update "$first" "$archive" >/dev/null 2>&1 || { fail "first deployment failed"; return 1; }
+    assert_eq "the first deployment is serving" "1.0.0" "$(active_version "$first")"
+
+    local output
+    output="$(update "$second" "$archive" 2>&1)" || { fail "second deployment failed"; info "$output"; return 1; }
+
+    assert_contains "the takeover is announced" "$output" "TAKING OVER"
+    assert_contains "it names the deployment being taken over" "$output" "$first"
+    assert_contains "it names a unit being taken" "$output" "ml-platform-portal.service"
+
+    # The units must now serve the second deployment.
+    local workdir
+    workdir="$(sed -n 's/^WorkingDirectory=\(.*\)$/\1/p' \
+        "${HOME}/.config/systemd/user/ml-platform-portal.service" | head -1)"
+    assert_contains "the units now point at the second deployment" "$workdir" "$second"
+    assert "the portal is serving again after the takeover" \
+        bash -c "curl -sf --max-time 5 http://127.0.0.1:5000/health/live >/dev/null"
+
+    # The first deployment's files are untouched -- only systemd moved on.
+    assert "the first deployment's release tree is left on disk" test -d "${first}/releases/1.0.0"
+    assert "the first deployment's data is left on disk" test -d "${first}/shared/data"
+}
+
 scenario_missing_prerequisite() {
     # A prerequisite the operator must install by hand must stop the deployment
     # in preflight, name what is missing and how to install it, and change
@@ -801,6 +837,7 @@ SCENARIOS=(
     data_survives
     rollback_bad_release
     manual_rollback
+    unit_takeover
     missing_prerequisite
     dry_run
     corrupt_archive
