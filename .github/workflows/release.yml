@@ -44,6 +44,26 @@ jobs:
         working-directory: deploy-repo
         run: python tools/manifest.py --validate manifest.yml
 
+      # The archive is named from suite_version, but the release is named from
+      # the tag. When they disagree you get a release called v1.0.5 containing
+      # an archive called v1.1.0, which is exactly as confusing as it sounds and
+      # has happened once already: a version bump was applied with sed, the
+      # pattern silently matched nothing because someone else had already moved
+      # the version, and the mismatch was not noticed until after publication.
+      - name: Tag must match suite_version
+        if: startsWith(github.ref, 'refs/tags/')
+        working-directory: deploy-repo
+        run: |
+          set -euo pipefail
+          suite="$(python -c "import yaml; print(yaml.safe_load(open('manifest.yml'))['suite_version'])")"
+          tag="${GITHUB_REF_NAME}"
+          if [ "$tag" != "v${suite}" ]; then
+            echo "::error::tag ${tag} does not match manifest suite_version ${suite} (expected v${suite})."
+            echo "::error::Bump suite_version in manifest.yml, or tag v${suite} instead."
+            exit 1
+          fi
+          echo "tag ${tag} matches suite_version ${suite}"
+
       - name: Check text hygiene (CRLF, BOM, shebangs, case collisions)
         working-directory: deploy-repo
         run: python tools/check_text_hygiene.py
