@@ -14,7 +14,7 @@
 # production release.
 
 schema: ml-suite.manifest.v1
-suite_version: 1.0.4
+suite_version: 1.1.0
 
 platform:
   os_id: ubuntu
@@ -139,7 +139,7 @@ services:
 
   gateway:
     repo: kvmani/ml_server
-    ref: v1.0.0
+    ref: v1.1.0
     commit: ""
     dir: ml_server
     import_check: ml_server
@@ -198,7 +198,7 @@ services:
 
   calculator:
     repo: kvmani/scientific_calculator
-    ref: v0.5.0
+    ref: v0.6.0
     commit: ""
     dir: scientific_calculator
     import_check: scientific_calculator_service
