@@ -31,6 +31,11 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+# Keep fixture units and ports clear of any real deployment on the same host.
+# These must match the values in run.sh.
+UNIT_SUFFIX = "-rehearsal"
+PORT_OFFSET = 2000
+
 STUB = '''#!/usr/bin/env python3
 """Stand-in for the @SERVICE@ service in a deployment rehearsal.
 
@@ -180,6 +185,22 @@ def build(out_dir: Path, version: str) -> Path:
     # installed on the developer's machine. The missing_prerequisite scenario
     # puts a requirement back deliberately to test the refusal path.
     manifest["system_requirements"] = []
+
+    # Genuine isolation from any real deployment on the same machine.
+    #
+    # The harness used to install units under the real names and then delete
+    # every ml-platform-*.service on the host between scenarios. On a developer
+    # box that is merely untidy; on a server with a live deployment it destroys
+    # it, which is exactly what happened here -- a staging deployment lost all
+    # five of its unit files to a rehearsal run.
+    #
+    # Fixture units are suffixed and fixture ports are moved well clear, so a
+    # rehearsal and a real deployment cannot touch each other at all.
+    for service in manifest["services"].values():
+        if service.get("unit"):
+            service["unit"] = service["unit"].replace(".service", f"{UNIT_SUFFIX}.service")
+        if isinstance(service.get("port"), int):
+            service["port"] = service["port"] + PORT_OFFSET
 
     if out_dir.exists():
         shutil.rmtree(out_dir)

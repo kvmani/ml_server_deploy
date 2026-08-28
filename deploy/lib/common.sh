@@ -452,7 +452,14 @@ history_append() {
 }
 
 history_last_good() {
-    # history_last_good [version-to-exclude] -- newest entry whose health is ok
+    # history_last_good [version-to-exclude]
+    #
+    # The most recently deployed version whose LATEST recorded outcome is ok.
+    #
+    # Taking simply "the newest entry that says ok" is wrong: a version can be
+    # deployed successfully, deployed again later and fail, and the older ok
+    # entry would still select it. The last thing known about a release is what
+    # counts, so records are collapsed per version first.
     local exclude="${1:-}" file
     file="$(history_file)"
     [[ -f "$file" ]] || return 1
@@ -461,7 +468,9 @@ import json
 import sys
 
 path, exclude = sys.argv[1], sys.argv[2]
-best = None
+
+latest_per_version: dict[str, str] = {}
+order: list[str] = []
 with open(path, encoding="utf-8") as handle:
     for line in handle:
         line = line.strip()
@@ -471,12 +480,21 @@ with open(path, encoding="utf-8") as handle:
             record = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if record.get("health") != "ok":
+        version = record.get("suite_version")
+        if not version:
             continue
-        if exclude and record.get("suite_version") == exclude:
-            continue
-        best = record
-print(best["suite_version"] if best else "", end="")
+        latest_per_version[version] = record.get("health", "")
+        if version in order:
+            order.remove(version)
+        order.append(version)
+
+choice = ""
+for version in order:
+    if exclude and version == exclude:
+        continue
+    if latest_per_version.get(version) == "ok":
+        choice = version
+print(choice, end="")
 PYEOF
 }
 

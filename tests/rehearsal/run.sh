@@ -10,9 +10,14 @@
 #   ./tests/rehearsal/run.sh fresh_install  # just one
 #   ./tests/rehearsal/run.sh --list
 #
-# Nothing outside ${REHEARSAL_HOME} (default ~/rehearsal) is touched, and the
-# systemd units it installs are all suffixed -rehearsal so they cannot collide
-# with a real deployment.
+# Nothing outside ${REHEARSAL_HOME} (default ~/rehearsal) is touched. Fixture
+# units are suffixed -rehearsal and fixture ports are offset by 2000, so a
+# rehearsal cannot collide with a real deployment on the same machine.
+#
+# That isolation is load-bearing, not decorative. An earlier version of this
+# harness installed units under the real names and removed every
+# ml-platform-*.service on the host between scenarios; running it alongside a
+# real deployment destroyed that deployment's units.
 
 set -Eeuo pipefail
 
@@ -31,6 +36,10 @@ WORK="${REHEARSAL_HOME}/work"
 # blocked. An empty resolved.txt still exercises update.sh's install path and
 # needs no network to do it.
 FIXTURE_REQS="${REHEARSAL_HOME}/fixture-requirements"
+
+# Must match UNIT_SUFFIX / PORT_OFFSET in make_fixtures.py.
+UNIT_SUFFIX="-rehearsal"
+PORT_OFFSET=2000
 
 PASSED=0
 FAILED=0
@@ -214,17 +223,22 @@ new_root() {
     echo "$root"
 }
 
-# Units are suffixed so a rehearsal can never disturb a real deployment.
+# Only ever touches units carrying the rehearsal suffix. The glob below must
+# stay narrow: a wider one removed a real deployment's units once already.
 stop_units() {
     local unit
     while read -r unit; do
         [[ -n "$unit" ]] || continue
         systemctl --user stop "$unit" >/dev/null 2>&1 || true
         systemctl --user disable "$unit" >/dev/null 2>&1 || true
-    done < <(systemctl --user list-unit-files 'ml-platform-*' --no-legend 2>/dev/null | awk '{print $1}')
-    rm -f "${HOME}/.config/systemd/user/ml-platform-"*.service 2>/dev/null || true
+    done < <(systemctl --user list-unit-files "ml-platform-*${UNIT_SUFFIX}.service" --no-legend 2>/dev/null | awk '{print $1}')
+    rm -f "${HOME}/.config/systemd/user/ml-platform-"*"${UNIT_SUFFIX}.service" 2>/dev/null || true
     systemctl --user daemon-reload >/dev/null 2>&1 || true
 }
+
+# Names and ports as the fixture manifest defines them.
+runit() { printf 'ml-platform-%s%s.service' "$1" "$UNIT_SUFFIX"; }
+rport() { printf '%d' $(( $1 + PORT_OFFSET )); }
 
 update() {
     # update <root> <archive> [extra args...]  -- returns the script's exit code
@@ -263,11 +277,11 @@ scenario_fresh_install() {
     assert "deployment history was written" test -s "${root}/shared/state/history.jsonl"
 
     local unit
-    for unit in ml-platform-portal ml-platform-pytex ml-platform-calculator ml-platform-converter ml-platform-hydride; do
-        assert "${unit}.service is active" systemctl --user is-active --quiet "${unit}.service"
+    for unit in portal pytex calculator converter hydride; do
+        assert "$(runit "$unit") is active" systemctl --user is-active --quiet "$(runit "$unit")"
     done
 
-    assert "portal answers on 5000" bash -c "curl -sf --max-time 5 http://127.0.0.1:5000/health/live >/dev/null"
+    assert "the portal answers on its port" bash -c "curl -sf --max-time 5 http://127.0.0.1:$(rport 5000)/health/live >/dev/null"
     assert "health_check.sh passes" "${REPO_ROOT}/deploy/health_check.sh" --root "$root" --systemd-scope user
 }
 
@@ -298,8 +312,8 @@ scenario_single_component() {
 
     local -A pid_before
     local unit
-    for unit in ml-platform-portal ml-platform-pytex ml-platform-calculator ml-platform-converter ml-platform-hydride; do
-        pid_before[$unit]="$(unit_pid "${unit}.service")"
+    for unit in portal pytex calculator converter hydride; do
+        pid_before[$unit]="$(unit_pid "$(runit "$unit")")"
     done
 
     # Build 1.0.1 where only pytex's commit differs from 1.0.0.
@@ -329,13 +343,13 @@ MUTATOR
     assert_eq "active version is 1.0.1" "1.0.1" "$(active_version "$root")"
 
     local restarted=0 untouched=0
-    if [[ "$(unit_pid ml-platform-pytex.service)" != "${pid_before[ml-platform-pytex]}" ]]; then
+    if [[ "$(unit_pid "$(runit pytex)")" != "${pid_before[pytex]}" ]]; then
         restarted=1
     fi
     assert_eq "pytex was restarted" "1" "$restarted"
 
-    for unit in ml-platform-calculator ml-platform-converter ml-platform-hydride; do
-        if [[ "$(unit_pid "${unit}.service")" == "${pid_before[$unit]}" ]]; then
+    for unit in calculator converter hydride; do
+        if [[ "$(unit_pid "$(runit "$unit")")" == "${pid_before[$unit]}" ]]; then
             untouched=$(( untouched + 1 ))
         else
             fail "${unit} was restarted but its component did not change"
@@ -352,7 +366,7 @@ scenario_idempotent() {
     archive="$(build_archive 1.0.0)" || return 1
 
     update "$root" "$archive" >/dev/null 2>&1 || { fail "first install failed"; return 1; }
-    local pid_before; pid_before="$(unit_pid ml-platform-portal.service)"
+    local pid_before; pid_before="$(unit_pid "$(runit portal)")"
     before="$(fingerprint "${root}/releases")"
 
     local output
@@ -361,7 +375,7 @@ scenario_idempotent() {
 
     after="$(fingerprint "${root}/releases")"
     assert_eq "the release tree is unchanged by the second run" "$before" "$after"
-    assert_eq "the portal was not restarted" "$pid_before" "$(unit_pid ml-platform-portal.service)"
+    assert_eq "the portal was not restarted" "$pid_before" "$(unit_pid "$(runit portal)")"
     assert_contains "the run reported that it was already deployed" "$output" "already active"
 }
 
@@ -436,7 +450,7 @@ BREAK
     assert "update.sh fails on a release that does not pass health checks" test "$rc" -ne 0
     assert_contains "it reports rolling back" "$output" "rolling back"
     assert_eq "the previous release is active again" "1.0.0" "$(active_version "$root")"
-    assert "the portal is serving again" bash -c "curl -sf --max-time 5 http://127.0.0.1:5000/health/live >/dev/null"
+    assert "the portal is serving again" bash -c "curl -sf --max-time 5 http://127.0.0.1:$(rport 5000)/health/live >/dev/null"
     assert_eq "persistent data was not touched by the failure" "precious" \
         "$(cat "${root}/shared/data/engagement.sqlite3" | tr -d '\n')"
     assert "the failed release is kept for diagnosis" test -d "${root}/releases/1.2.0"
@@ -594,7 +608,7 @@ scenario_port_conflict() {
 import socket, time
 s = socket.socket()
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-s.bind(('127.0.0.1', 5000))
+s.bind(('127.0.0.1', $(rport 5000)))
 s.listen(1)
 time.sleep(120)
 " &
@@ -645,7 +659,7 @@ MUTATOR
     assert "a release with an uninstallable dependency is refused" test "$rc" -ne 0
     assert_contains "the message points at the mirror audit" "$output" "mirror_audit.txt"
     assert_eq "the previous release is still active" "1.0.0" "$(active_version "$root")"
-    assert "the portal never stopped serving" bash -c "curl -sf --max-time 5 http://127.0.0.1:5000/health/live >/dev/null"
+    assert "the portal never stopped serving" bash -c "curl -sf --max-time 5 http://127.0.0.1:$(rport 5000)/health/live >/dev/null"
 }
 
 scenario_interrupted_update() {
@@ -735,15 +749,15 @@ scenario_unit_takeover() {
 
     assert_contains "the takeover is announced" "$output" "TAKING OVER"
     assert_contains "it names the deployment being taken over" "$output" "$first"
-    assert_contains "it names a unit being taken" "$output" "ml-platform-portal.service"
+    assert_contains "it names a unit being taken" "$output" "$(runit portal)"
 
     # The units must now serve the second deployment.
     local workdir
     workdir="$(sed -n 's/^WorkingDirectory=\(.*\)$/\1/p' \
-        "${HOME}/.config/systemd/user/ml-platform-portal.service" | head -1)"
+        "${HOME}/.config/systemd/user/$(runit portal)" | head -1)"
     assert_contains "the units now point at the second deployment" "$workdir" "$second"
     assert "the portal is serving again after the takeover" \
-        bash -c "curl -sf --max-time 5 http://127.0.0.1:5000/health/live >/dev/null"
+        bash -c "curl -sf --max-time 5 http://127.0.0.1:$(rport 5000)/health/live >/dev/null"
 
     # The first deployment's files are untouched -- only systemd moved on.
     assert "the first deployment's release tree is left on disk" test -d "${first}/releases/1.0.0"
