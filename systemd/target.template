@@ -1,0 +1,17 @@
+# Rendered by deploy/update.sh when the manifest names a systemd target.
+#
+# Grouping the services under a target is what makes the whole suite start,
+# stop and report as one thing:
+#
+#   systemctl --user start  @TARGET_NAME@
+#   systemctl --user status @TARGET_NAME@
+#
+# The existing office deployment is arranged this way, so the target is created
+# if it is missing rather than moving those services to default.target.
+
+[Unit]
+Description=@DESCRIPTION@
+Documentation=file://@ROOT@/current/RUNBOOK.md
+
+[Install]
+WantedBy=default.target

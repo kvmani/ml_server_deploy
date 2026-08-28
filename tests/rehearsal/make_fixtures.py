@@ -196,7 +196,23 @@ def build(out_dir: Path, version: str) -> Path:
     #
     # Fixture units are suffixed and fixture ports are moved well clear, so a
     # rehearsal and a real deployment cannot touch each other at all.
+    # The suite target is suffixed for the same reason the units are: a
+    # rehearsal must not create, enable or restart the real ml-platform.target
+    # on a machine that has a live deployment.
+    runtime = manifest.setdefault("runtime", {})
+    if runtime.get("systemd_target"):
+        runtime["systemd_target"] = runtime["systemd_target"].replace(
+            ".target", f"{UNIT_SUFFIX}.target")
+    # Stub services stay on loopback; there is no reason to expose a rehearsal
+    # to the network, whatever the real deployment does.
+    runtime["bind_host"] = "127.0.0.1"
+
     for service in manifest["services"].values():
+        # Ordering references other units by name, so they need the suffix too.
+        for key in ("after", "wants"):
+            if service.get(key):
+                service[key] = [u.replace(".service", f"{UNIT_SUFFIX}.service")
+                                for u in service[key]]
         if service.get("unit"):
             service["unit"] = service["unit"].replace(".service", f"{UNIT_SUFFIX}.service")
         if isinstance(service.get("port"), int):

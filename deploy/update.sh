@@ -709,10 +709,42 @@ TEMPLATE="${TARGET_RELEASE}/systemd/service.template"
 UNITS_CHANGED=0
 RENDERED_UNITS=()
 
+# The suite target. Units are WantedBy and PartOf it, so it has to exist or
+# `systemctl --user enable` fails. The office deployment already has one; a
+# fresh host will not, so it is created when the manifest names one.
+SUITE_TARGET="$(mf_or 'runtime.systemd_target' '')"
+if [[ -n "$SUITE_TARGET" ]]; then
+    TARGET_TEMPLATE="${TARGET_RELEASE}/systemd/target.template"
+    [[ -f "$TARGET_TEMPLATE" ]] || TARGET_TEMPLATE="${SCRIPT_DIR}/../systemd/target.template"
+    if [[ -f "$TARGET_TEMPLATE" ]]; then
+        target_text="$(<"$TARGET_TEMPLATE")"
+        target_text="${target_text//@TARGET_NAME@/$SUITE_TARGET}"
+        target_text="${target_text//@DESCRIPTION@/Unified Scientific ML Platform}"
+        target_text="${target_text//@ROOT@/$ML_ROOT}"
+        target_tmp="$(mktemp)"
+        printf '%s\n' "$target_text" >"$target_tmp"
+        if [[ -f "${UNIT_DIR}/${SUITE_TARGET}" ]] && cmp -s "$target_tmp" "${UNIT_DIR}/${SUITE_TARGET}"; then
+            log "  ${SUITE_TARGET}: unchanged"
+        else
+            cp "$target_tmp" "${UNIT_DIR}/${SUITE_TARGET}"
+            UNITS_CHANGED=1
+            log "  ${SUITE_TARGET}: installed"
+        fi
+        rm -f "$target_tmp"
+    fi
+fi
+
+# The address services listen on. 0.0.0.0 by default because the target server
+# has no reverse proxy and is reached directly across the intranet; binding to
+# loopback there would take the site down while local health checks still pass.
+ML_BIND_HOST="$(mf_or 'runtime.bind_host' '0.0.0.0')"
+log "services will bind ${ML_BIND_HOST}"
+
 # Expand the manifest's own {tokens} in a value. Pure bash substitution: no sed
 # delimiters to collide with paths, and no shell re-parsing of the result.
 expand_tokens() {
     local text="$1" port="$2"
+    text="${text//\{bind\}/$ML_BIND_HOST}"
     text="${text//\{venv\}/$ML_VENV}"
     text="${text//\{release\}/$TARGET_RELEASE}"
     text="${text//\{current\}/${ML_ROOT}/current}"
@@ -733,10 +765,28 @@ render_unit() {
     # No suite version in the description: it would change every release.
     description="ML Platform -- ${id}"
 
+    # Group units under the manifest's target when it names one, so that an
+    # existing `systemctl --user start ml-platform.target` keeps bringing the
+    # whole suite up. Fall back to the scope default when it does not.
+    local default_target
     if [[ "$ML_SYSTEMD_SCOPE" == "user" ]]; then
-        wanted_by="default.target"; target="default.target"
+        default_target="default.target"
     else
-        wanted_by="multi-user.target"; target="multi-user.target"
+        default_target="multi-user.target"
+    fi
+    target="$(mf_or 'runtime.systemd_target' "$default_target")"
+    wanted_by="$target"
+
+    # Ordering: the gateway must come up after the services it routes to, which
+    # is how the existing deployment is arranged and worth preserving.
+    local after_list wants_list after_line="" wants_line=""
+    after_list="$(mf "services.${id}.after" 2>/dev/null | tr '\n' ' ' || true)"
+    wants_list="$(mf "services.${id}.wants" 2>/dev/null | tr '\n' ' ' || true)"
+    if [[ -n "${after_list// /}" ]]; then
+        after_line=" ${after_list% }"
+    fi
+    if [[ -n "${wants_list// /}" ]]; then
+        wants_line=$'\n'"Wants=${wants_list% }"
     fi
 
     # Environment= lines from the manifest.
@@ -759,6 +809,8 @@ for key, value in (doc['services'][sys.argv[2]].get('environment') or {}).items(
     text="${text//@DESCRIPTION@/$description}"
     text="${text//@ROOT@/$ML_ROOT}"
     text="${text//@TARGET@/$target}"
+    text="${text//@AFTER@/$after_line}"
+    text="${text//@WANTS@/$wants_line}"
     text="${text//@WORKDIR@/$workdir}"
     text="${text//@ENVIRONMENT@/$env_lines}"
     text="${text//@EXECSTART@/$start}"
@@ -793,6 +845,9 @@ done < <(service_ids)
 
 if (( UNITS_CHANGED )); then
     sctl daemon-reload || fail_and_rollback "systemctl daemon-reload failed"
+    if [[ -n "$SUITE_TARGET" ]]; then
+        sctl enable "$SUITE_TARGET" >/dev/null 2>&1 || warn "could not enable ${SUITE_TARGET}"
+    fi
     ok "unit files updated and daemon reloaded"
 else
     ok "unit files already current; no daemon-reload needed"

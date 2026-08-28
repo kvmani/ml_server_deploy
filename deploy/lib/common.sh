@@ -688,8 +688,23 @@ unit_deployment_root() {
     [[ -f "$unit_file" ]] || return 0
     workdir="$(sed -n 's/^WorkingDirectory=\(.*\)$/\1/p' "$unit_file" | head -1)"
     [[ -n "$workdir" ]] || return 0
-    # WorkingDirectory is <root>/current/apps/<component>
-    printf '%s' "${workdir%%/current/*}"
+
+    # A unit this tool wrote has WorkingDirectory=<root>/current/apps/<component>.
+    if [[ "$workdir" == */current/* ]]; then
+        printf '%s' "${workdir%%/current/*}"
+        return 0
+    fi
+
+    # Anything else was written by hand or by an older arrangement -- the office
+    # deployment, for instance, runs from <root>/src/<component>/<component>-main
+    # with no `current` symlink at all. Reporting the full working directory
+    # there would be misleading, so the deployment root is inferred by trimming
+    # the component path, and the whole path is shown when that is not possible.
+    if [[ "$workdir" == */src/* ]]; then
+        printf '%s' "${workdir%%/src/*}"
+        return 0
+    fi
+    printf '%s' "$workdir"
 }
 
 # check_unit_takeover <unit-dir> <this-root> <unit...>

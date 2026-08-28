@@ -14,7 +14,7 @@
 # production release.
 
 schema: ml-suite.manifest.v1
-suite_version: 1.1.1
+suite_version: 1.2.0
 
 platform:
   os_id: ubuntu
@@ -29,6 +29,23 @@ runtime:
     - /opt/ml_server
   systemd_scope: auto        # auto | user | system | none
   unit_prefix: ml-platform-
+
+  # The address the services listen on.
+  #
+  # This is 0.0.0.0 because the office server has NO reverse proxy in front of
+  # it -- see docs/office_inventory_reference.txt, section 11 -- and users reach
+  # the portal directly on its port from elsewhere on the intranet. Binding to
+  # 127.0.0.1 would take the whole site off the network while every health check
+  # on the host itself still passed, so the breakage would look like a success.
+  #
+  # Set this to 127.0.0.1 only once something else is terminating connections in
+  # front of the suite.
+  bind_host: "0.0.0.0"
+
+  # The existing deployment groups its units under a target, so `systemctl
+  # --user start ml-platform.target` brings the whole suite up. Units are
+  # rendered WantedBy this target to preserve that.
+  systemd_target: ml-platform.target
 
 # Persistent state lives here, outside every release directory, and is never
 # touched by update.sh or rollback.sh.
@@ -147,11 +164,16 @@ services:
     env: shared
     requirements: [requirements.txt]
     unit: ml-platform-portal.service
+    # The portal is the gateway, so it comes up after the services it routes to.
+    after: [ml-platform-hydride.service, ml-platform-pytex.service,
+            ml-platform-calculator.service, ml-platform-converter.service]
+    wants: [ml-platform-hydride.service, ml-platform-pytex.service,
+            ml-platform-calculator.service, ml-platform-converter.service]
     port: 5000
     health: /health/live
     health_deep: /health
     start: >-
-      {venv}/bin/gunicorn --bind 127.0.0.1:{port} --workers 2 --timeout 300
+      {venv}/bin/gunicorn --bind {bind}:{port} --workers 2 --timeout 300
       ml_server.app.server:create_app()
     workdir: "{current}/apps/ml_server"
     environment:
@@ -185,7 +207,7 @@ services:
     unit: ml-platform-pytex.service
     port: 8765
     health: /api/health
-    start: "{venv}/bin/python -m pytex.app serve --host 127.0.0.1 --port {port}"
+    start: "{venv}/bin/python -m pytex.app serve --host {bind} --port {port}"
     workdir: "{current}/apps/pytex"
     environment:
       PYTHONPATH: "{current}/apps/pytex/src"
@@ -208,7 +230,7 @@ services:
     unit: ml-platform-calculator.service
     port: 5055
     health: /api/health
-    start: "{venv}/bin/python app.py"
+    start: "{venv}/bin/python app.py --host {bind} --port {port}"
     workdir: "{current}/apps/scientific_calculator"
     environment:
       PYTHONPATH: "{current}/apps/scientific_calculator/src"
@@ -226,7 +248,7 @@ services:
     unit: ml-platform-converter.service
     port: 5065
     health: /api/health
-    start: "{venv}/bin/python app.py"
+    start: "{venv}/bin/python app.py --host {bind} --port {port}"
     workdir: "{current}/apps/unit_converter"
     environment:
       PYTHONPATH: "{current}/apps/unit_converter/src"
@@ -284,7 +306,9 @@ services:
     unit: ml-platform-hydride.service
     port: 5005
     health: /health
-    start: "{venv}/bin/python scripts/run_web_server.py --host 127.0.0.1 --port {port} --no-preload"
+    start: >-
+      {venv}/bin/python scripts/run_web_server.py --host {bind} --port {port}
+      --threads 4 --preload --no-print-urls
     workdir: "{current}/apps/HydrideSegmentation"
     environment:
       PYTHONPATH: "{current}/apps/HydrideSegmentation"

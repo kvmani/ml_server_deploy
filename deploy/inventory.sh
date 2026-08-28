@@ -243,9 +243,16 @@ section "9. Reachability -- confirming the air gap"
 printf '\n  These SHOULD fail on an air-gapped office host.  A success here means\n'
 printf '  the host can reach GitHub, which contradicts the deployment assumption.\n\n'
 for target in https://github.com https://pypi.org; do
-    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 "$target" 2>/dev/null || echo 000)"
-    if [[ "$code" == "000" ]]; then
-        field "  $target" "unreachable (expected)"
+    # curl already prints 000 on a connection failure AND exits non-zero, so a
+    # `|| echo 000` fallback appends a second 000 and the comparison never
+    # matches. That made this report an air-gapped host as REACHABLE, which is
+    # the opposite of the truth and exactly the sort of thing this section
+    # exists to establish. Capture first, then decide.
+    if ! code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 "$target" 2>/dev/null)"; then
+        code="000"
+    fi
+    if [[ "$code" == "000" || -z "$code" ]]; then
+        field "  $target" "unreachable (expected on an air-gapped host)"
     else
         field "  $target" "REACHABLE (HTTP ${code}) -- unexpected, note this"
     fi

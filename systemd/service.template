@@ -15,7 +15,7 @@
 [Unit]
 Description=@DESCRIPTION@
 Documentation=file://@ROOT@/current/RUNBOOK.md
-After=network.target
+After=network.target@AFTER@@WANTS@
 PartOf=@TARGET@
 
 [Service]

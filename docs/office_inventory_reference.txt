@@ -1,0 +1,560 @@
+################################################################################
+# REFERENCE: the real target environment
+#
+# Captured by deploy/inventory.sh on the office server this suite deploys to,
+# and kept here so the manifest and the deployment scripts can be checked
+# against what is actually there rather than what we assume.
+#
+# SANITISED for tracking in git. The following were replaced:
+#   <internal package mirror>  -> repo.example.office.in
+#   <organisation domain>      -> example.office.in
+#   <hostname>                 -> office-vm
+#   <numeric uid>              -> 1000
+# The service account name (kvmani) was left in place: it is the repository
+# owner's own public account name and already appears throughout manifest.yml
+# and the deployment paths.
+#
+# Known to be out of date already:
+#   * node and npm are shown as absent; both have since been installed.
+#   * sqlite3 is shown as absent and is required -- preflight will say so.
+#
+# Two things in here drove real changes to the deployment scripts:
+#   1. The services bind 0.0.0.0 and there is NO reverse proxy. Users reach the
+#      portal directly. Binding to 127.0.0.1 would take the site off the
+#      intranet, so bind_host is now a manifest setting defaulting to 0.0.0.0.
+#   2. Section 9 claims GitHub is REACHABLE (HTTP 000000). That was a bug in
+#      inventory.sh, not a property of the host: 000 means unreachable, and the
+#      check was comparing against a doubled value. Fixed; the host is in fact
+#      air-gapped as expected.
+################################################################################
+
+ML Server suite -- server inventory
+generated  2026-08-28T06:42:14Z
+host       office-vm
+invoked by kvmani
+
+==============================================================
+  1. Operating system
+--------------------------------------------------------------
+  distribution                 Ubuntu 24.04.4 LTS
+  id / version                 ubuntu / 24.04
+  kernel                       Linux 6.17.0-23-generic
+  architecture                 x86_64
+  virtualisation               kvm
+  uptime                       up 4 weeks, 2 days, 19 hours, 32 minutes
+
+==============================================================
+  2. Identity, sudo and systemd session
+--------------------------------------------------------------
+  user / uid                   kvmani / 1000
+  home                         /home/kvmani
+  groups                       avahi
+  passwordless sudo            no (sudo present, would prompt)
+  linger                       enabled
+  user systemd bus             reachable (/run/user/1000)
+  user manager                 running
+  system manager               degraded
+unknown
+
+==============================================================
+  3. Interpreters and required tools
+--------------------------------------------------------------
+  python3                      Python 3.12.3
+  python3.12                   Python 3.12.3
+  pip3                         /usr/bin/pip3
+  node                         absent
+  npm                          absent
+  git                          /usr/bin/git
+  curl                         /usr/bin/curl
+  tar                          /usr/bin/tar
+  sha256sum                    /usr/bin/sha256sum
+  flock                        /usr/bin/flock
+  ss                           /usr/bin/ss
+  sqlite3                      absent
+  nginx                        absent
+  redis-server                 absent
+  gunicorn                     absent
+  pdftoppm                     /usr/bin/pdftoppm
+
+==============================================================
+  4. Candidate deployment roots
+--------------------------------------------------------------
+  /home/kvmani/ml_platform     EXISTS (2.0G )
+      total 32
+      drwxr-xr-x  6 kvmani avahi 4096 Aug 24 11:31 .
+      drwxr-x--- 22 kvmani avahi 4096 Aug 28 12:12 ..
+      drwxr-xr-x  3 kvmani avahi 4096 Aug 24 10:52 bundle
+      drwxr-xr-x  2 kvmani avahi 4096 Aug 24 11:30 config
+      -rw-r--r--  1 root   root   521 Aug  4 18:08 microseg-web.service.pre-unified-backup
+      -rw-r--r--  1 kvmani avahi  350 Aug 20 13:46 pytex.service.pre-unified-backup
+      drwxr-xr-x  9 kvmani avahi 4096 Aug 24 10:52 src
+      drwxr-xr-x  6 kvmani avahi 4096 Aug 24 11:07 .venv
+  /opt/ml_server               absent
+  /opt/microseg                EXISTS (2.1G )
+      total 12
+      drwxr-xr-x  3 kvmani avahi 4096 Aug  4 17:05 .
+      drwxr-xr-x  4 root   root  4096 Aug  4 17:05 ..
+      drwxr-xr-x 26 kvmani avahi 4096 Aug  6 17:06 HydrideSegmentation
+  /home/kvmani/ml_platform_staging absent
+
+  What detect_layout() would conclude right now:
+    candidate /home/kvmani/ml_platform: exists=1 active=0
+    candidate /opt/ml_server: exists=0 active=0
+    platform root exists but has no active release; treating as a partial install
+    unit files found: user=5 system=1
+    systemd scope detected as 'user'
+    => ROOT=/home/kvmani/ml_platform LAYOUT=platform SCOPE=user VENV=/home/kvmani/ml_platform/.venv
+
+==============================================================
+  5. systemd units
+--------------------------------------------------------------
+
+  User units matching ml*/microseg*:
+      ml-platform-calculator.service loaded active running ML Platform - Scientific Calculator
+      ml-platform-converter.service  loaded active running ML Platform - Unit Converter
+      ml-platform-hydride.service    loaded active running ML Platform - Hydride Segmentation
+      ml-platform-portal.service     loaded active running ML Platform - Scientific Tools Gateway
+      ml-platform-pytex.service      loaded active running ML Platform - PyTex Workbench
+      ml-platform.target             loaded active active  Unified Scientific ML Platform
+    [file] ml-platform-calculator.service disabled enabled
+    [file] ml-platform-converter.service  disabled enabled
+    [file] ml-platform-hydride.service    disabled enabled
+    [file] ml-platform-portal.service     disabled enabled
+    [file] ml-platform-pytex.service      disabled enabled
+    [file] ml-platform.target             enabled  enabled
+
+  System units matching ml*/microseg*:
+    [file] microseg-web.service disabled enabled
+
+  Unit file contents (these define the real start commands):
+
+    --- /home/kvmani/.config/systemd/user/ml-platform-calculator.service
+      [Unit]
+      Description=ML Platform - Scientific Calculator
+      After=network.target
+      
+      [Service]
+      Type=simple
+      WorkingDirectory=/home/kvmani/ml_platform/src/scientific_calculator/scientific_calculator-main
+      ExecStart=/home/kvmani/ml_platform/.venv/bin/python app.py --host 0.0.0.0 --port 5055
+      Restart=on-failure
+      RestartSec=5
+      Environment=PYTHONUNBUFFERED=1
+      
+      [Install]
+      WantedBy=ml-platform.target
+
+    --- /home/kvmani/.config/systemd/user/ml-platform-converter.service
+      [Unit]
+      Description=ML Platform - Unit Converter
+      After=network.target
+      
+      [Service]
+      Type=simple
+      WorkingDirectory=/home/kvmani/ml_platform/src/unit_converter/unit_converter-main
+      ExecStart=/home/kvmani/ml_platform/.venv/bin/python app.py --host 0.0.0.0 --port 5065
+      Restart=on-failure
+      RestartSec=5
+      Environment=PYTHONUNBUFFERED=1
+      
+      [Install]
+      WantedBy=ml-platform.target
+
+    --- /home/kvmani/.config/systemd/user/ml-platform-hydride.service
+      [Unit]
+      Description=ML Platform - Hydride Segmentation
+      After=network.target
+      
+      [Service]
+      Type=simple
+      WorkingDirectory=/home/kvmani/ml_platform/src/hydride/HydrideSegmentation-main
+      ExecStart=/home/kvmani/ml_platform/.venv/bin/python scripts/run_web_server.py --host 0.0.0.0 --port 5005 --threads 4 --preload --no-print-urls
+      Restart=on-failure
+      RestartSec=5
+      Environment=PYTHONUNBUFFERED=1
+      
+      [Install]
+      WantedBy=ml-platform.target
+
+    --- /home/kvmani/.config/systemd/user/ml-platform-portal.service
+      [Unit]
+      Description=ML Platform - Scientific Tools Gateway
+      After=network.target ml-platform-hydride.service ml-platform-pytex.service ml-platform-calculator.service ml-platform-converter.service
+      Wants=ml-platform-hydride.service ml-platform-pytex.service ml-platform-calculator.service ml-platform-converter.service
+      
+      [Service]
+      Type=simple
+      WorkingDirectory=/home/kvmani/ml_platform/src/ml_server/ml_server-main
+      EnvironmentFile=/home/kvmani/ml_platform/config/ml-platform.env
+      ExecStart=/home/kvmani/ml_platform/.venv/bin/gunicorn --bind 0.0.0.0:5000 --workers 2 --timeout 300 ml_server.app.server:create_app()
+      Restart=on-failure
+      RestartSec=5
+      
+      [Install]
+      WantedBy=ml-platform.target
+
+    --- /home/kvmani/.config/systemd/user/ml-platform-pytex.service
+      [Unit]
+      Description=ML Platform - PyTex Workbench
+      After=network.target
+      
+      [Service]
+      Type=simple
+      WorkingDirectory=/home/kvmani/ml_platform/src/pytex/pytex-main
+      ExecStart=/home/kvmani/ml_platform/.venv/bin/python -m pytex.app serve --host 0.0.0.0 --port 8765
+      Restart=on-failure
+      RestartSec=5
+      Environment=PYTHONUNBUFFERED=1
+      
+      [Install]
+      WantedBy=ml-platform.target
+
+    --- /etc/systemd/system/microseg-web.service
+      [Unit]
+      Description=MicroSeg Hydride Segmentation Intranet Web App
+      After=network-online.target
+      Wants=network-online.target
+      
+      [Service]
+      Type=simple
+      User=kvmani
+      WorkingDirectory=/opt/microseg/HydrideSegmentation
+      Environment=PYTHONUNBUFFERED=1
+      Environment=OMP_NUM_THREADS=4
+      Environment=MKL_NUM_THREADS=4
+      ExecStart=/opt/microseg/HydrideSegmentation/.venv/bin/python scripts/run_web_server.py --host 0.0.0.0 --port 5005 --threads 4 --preload --no-print-urls
+      Restart=on-failure
+      RestartSec=5
+      
+      [Install]
+      WantedBy=multi-user.target
+
+==============================================================
+  6. Listening TCP ports
+--------------------------------------------------------------
+  State  Recv-Q Send-Q Local Address:Port Peer Address:PortProcess                                                                                        
+  LISTEN 0      128        127.0.0.1:6014      0.0.0.0:*                                                                                                  
+  LISTEN 0      128        127.0.0.1:6013      0.0.0.0:*                                                                                                  
+  LISTEN 0      128        127.0.0.1:6012      0.0.0.0:*                                                                                                  
+  LISTEN 0      128        127.0.0.1:6011      0.0.0.0:*                                                                                                  
+  LISTEN 0      128        127.0.0.1:6010      0.0.0.0:*                                                                                                  
+  LISTEN 0      4096      127.0.0.54:53        0.0.0.0:*                                                                                                  
+  LISTEN 0      4096       127.0.0.1:631       0.0.0.0:*                                                                                                  
+  LISTEN 0      4096   127.0.0.53%lo:53        0.0.0.0:*                                                                                                  
+  LISTEN 0      1024         0.0.0.0:5065      0.0.0.0:*    users:(("python",pid=219114,fd=6))                                                            
+  LISTEN 0      1024         0.0.0.0:5005      0.0.0.0:*    users:(("python",pid=219115,fd=7))                                                            
+  LISTEN 0      2048         0.0.0.0:5000      0.0.0.0:*    users:(("gunicorn",pid=219132,fd=5),("gunicorn",pid=219128,fd=5),("gunicorn",pid=219117,fd=5))
+  LISTEN 0      1024         0.0.0.0:5055      0.0.0.0:*    users:(("python",pid=756542,fd=6))                                                            
+  LISTEN 0      5            0.0.0.0:8765      0.0.0.0:*    users:(("python",pid=756543,fd=3))                                                            
+  LISTEN 0      4096         0.0.0.0:22        0.0.0.0:*                                                                                                  
+  LISTEN 0      2                  *:3389            *:*                                                                                                  
+  LISTEN 0      2              [::1]:3350         [::]:*                                                                                                  
+  LISTEN 0      4096           [::1]:631          [::]:*                                                                                                  
+  LISTEN 0      128            [::1]:6014         [::]:*                                                                                                  
+  LISTEN 0      128            [::1]:6012         [::]:*                                                                                                  
+  LISTEN 0      128            [::1]:6013         [::]:*                                                                                                  
+  LISTEN 0      128            [::1]:6010         [::]:*                                                                                                  
+  LISTEN 0      128            [::1]:6011         [::]:*                                                                                                  
+  LISTEN 0      4096            [::]:22           [::]:*                                                                                                  
+
+  Ports the suite expects:
+    5000                       IN USE: LISTEN 0      2048   0.0.0.0:5000 0.0.0.0:* users:(("gunicorn",pid=219132,fd=5),("gunicorn",pid=219128,fd=5),("gunicorn",pid=219117,fd=5))
+    5005                       IN USE: LISTEN 0      1024   0.0.0.0:5005 0.0.0.0:* users:(("python",pid=219115,fd=7))
+    5045                       free
+    5055                       IN USE: LISTEN 0      1024   0.0.0.0:5055 0.0.0.0:* users:(("python",pid=756542,fd=6))
+    5065                       IN USE: LISTEN 0      1024   0.0.0.0:5065 0.0.0.0:* users:(("python",pid=219114,fd=6))
+    5070                       free
+    8765                       IN USE: LISTEN 0      5      0.0.0.0:8765 0.0.0.0:* users:(("python",pid=756543,fd=3))
+    6379                       free
+    80                         free
+
+==============================================================
+  7. Python environments
+--------------------------------------------------------------
+
+  /home/kvmani/ml_platform/.venv
+    version: Python 3.12.3
+    packages (113 installed):
+      albucore==0.0.24
+      albumentations==2.0.8
+      amqp==5.3.1
+      annotated-doc==0.0.5
+      annotated-types==0.8.0
+      anyio==4.14.2
+      billiard==4.2.4
+      blinker==1.9.0
+      brotli==1.2.0
+      celery==5.3.6
+      certifi==2026.7.22
+      charset-normalizer==3.5.1
+      click==8.4.2
+      click-didyoumean==0.3.1
+      click-plugins==1.1.1.2
+      click-repl==0.3.0
+      contourpy==1.3.3
+      cycler==0.12.1
+      et_xmlfile==2.0.0
+      filelock==3.32.4
+      Flask==3.0.2
+      Flask-Admin==1.6.1
+      Flask-Compress==1.14
+      flask-talisman==1.1.0
+      flexcache==0.3
+      flexparser==0.4
+      fonttools==4.63.0
+      fsspec==2026.7.0
+      gunicorn==21.2.0
+      h11==0.16.0
+      h5py==3.16.0
+      hf-xet==1.6.0
+      httpcore==1.0.9
+      httpx==0.28.1
+      huggingface_hub==1.28.0
+      hydride-segmentation==1.0.0
+      idna==3.19
+      ImageIO==2.37.4
+      itsdangerous==2.2.0
+      Jinja2==3.1.2
+      joblib==1.5.3
+      kiwisolver==1.5.0
+      kombu==5.6.2
+      lazy-loader==0.5
+      markdown-it-py==4.2.0
+      MarkupSafe==3.0.3
+      matplotlib==3.11.1
+      mdurl==0.1.2
+      ml_server==1.0.0
+      mpmath==1.3.0
+      narwhals==2.25.0
+      networkx==3.6.1
+      numpy==2.5.2
+      opencv-python-headless==5.0.0.93
+      openpyxl==3.1.5
+      packaging==26.3
+      pandas==2.3.3
+      pdf_tools_service==0.2.0
+      pdf2image==1.17.0
+      pillow==11.1.0
+      Pint==0.25.3
+      pip==26.2.1
+      platformdirs==4.11.3
+      prometheus_client==0.20.0
+      prompt_toolkit==3.0.53
+      pydantic==2.13.4
+      pydantic_core==2.46.4
+      Pygments==2.21.0
+      pyparsing==3.3.2
+      pypdf==6.16.2
+      pytex==0.2.0
+      python-dateutil==2.9.0.post0
+      python-dotenv==1.0.0
+      pytz==2026.3.post1
+      PyYAML==6.0.3
+      redis==5.0.1
+      regex==2026.7.19
+      requests==2.32.4
+      rich==15.0.0
+      safetensors==0.8.0
+      scientific-calculator==0.5.0
+      scikit-image==0.26.0
+      scikit-learn==1.9.0
+      scipy==1.18.1
+      segmentation_models_pytorch==0.5.0
+      setuptools==84.0.0
+      shellingham==1.5.4
+      simsimd==6.5.16
+      six==1.17.0
+      stringzilla==5.1.2
+      sympy==1.14.0
+      tabular-ml-service==0.2.0
+      threadpoolctl==3.6.0
+      tifffile==2026.8.23
+      timm==1.0.28
+      tokenizers==0.22.2
+      torch==2.9.1+cpu
+      torchvision==0.24.1+cpu
+      tqdm==4.70.0
+      transformers==5.15.1
+      typer==0.27.1
+      typing_extensions==4.16.0
+      typing-inspection==0.4.4
+      tzdata==2026.3
+      unit-converter==0.2.0
+      urllib3==2.7.0
+      vine==5.1.0
+      waitress==3.0.2
+      wcwidth==0.8.2
+      Werkzeug==3.0.1
+      wheel==0.48.0
+      WTForms==3.2.2
+      xlsxwriter==3.2.9
+    pip check:       No broken requirements found.
+
+  /opt/microseg/HydrideSegmentation/.venv
+    version: Python 3.12.3
+    packages (73 installed):
+      albucore==0.0.24
+      albumentations==2.0.8
+      annotated-doc==0.0.5
+      annotated-types==0.8.0
+      anyio==4.14.2
+      blinker==1.9.0
+      certifi==2026.7.22
+      click==8.4.2
+      contourpy==1.3.3
+      cycler==0.12.1
+      filelock==3.32.2
+      Flask==3.1.3
+      fonttools==4.63.0
+      fsspec==2026.7.0
+      h11==0.16.0
+      h5py==3.16.0
+      hf-xet==1.6.0
+      httpcore==1.0.9
+      httpx==0.28.1
+      huggingface_hub==1.26.0
+      hydride-segmentation==1.0.0
+      idna==3.18
+      ImageIO==2.37.4
+      itsdangerous==2.2.0
+      Jinja2==3.1.6
+      joblib==1.5.3
+      kiwisolver==1.5.0
+      lazy-loader==0.5
+      markdown-it-py==4.2.0
+      MarkupSafe==3.0.3
+      matplotlib==3.11.1
+      mdurl==0.1.2
+      mpmath==1.3.0
+      narwhals==2.24.0
+      networkx==3.6.1
+      numpy==2.5.1
+      opencv-python-headless==5.0.0.93
+      packaging==26.2
+      pillow==12.3.0
+      pip==24.0
+      pydantic==2.13.4
+      pydantic_core==2.46.4
+      Pygments==2.20.0
+      pyparsing==3.3.2
+      python-dateutil==2.9.0.post0
+      PyYAML==6.0.3
+      regex==2026.7.19
+      rich==15.0.0
+      safetensors==0.8.0
+      scikit-image==0.26.0
+      scikit-learn==1.9.0
+      scipy==1.18.0
+      segmentation_models_pytorch==0.5.0
+      setuptools==83.0.0
+      shellingham==1.5.4
+      simsimd==6.5.16
+      six==1.17.0
+      stringzilla==5.0.7
+      sympy==1.14.0
+      threadpoolctl==3.6.0
+      tifffile==2026.7.31
+      timm==1.0.28
+      tokenizers==0.22.2
+      torch==2.9.1+cpu
+      torchvision==0.24.1+cpu
+      tqdm==4.70.0
+      transformers==5.14.1
+      typer==0.27.1
+      typing_extensions==4.16.0
+      typing-inspection==0.4.2
+      waitress==3.0.2
+      Werkzeug==3.1.8
+      xlsxwriter==3.2.9
+    pip check:       No broken requirements found.
+
+==============================================================
+  8. Package mirror configuration
+--------------------------------------------------------------
+
+  pip:
+    --- /etc/pip.conf
+      # Contents of /etc/pip.conf				
+      [global]
+      index-url = http://repo.example.office.in/pypi/simple
+      trusted-host = repo.example.office.in
+      disable-pip-version-check = true
+      			
+    /home/kvmani/.pip/pip.conf: absent
+    /home/kvmani/.config/pip/pip.conf: absent
+    PIP_INDEX_URL              <unset>
+    PIP_CONFIG_FILE            <unset>
+
+  npm:
+    npm not installed
+
+  apt sources:
+    deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] http://repo.example.office.in/docker/linux/ubuntu noble stable
+    URIs: http://repo.example.office.in/ubuntu/
+    URIs: http://repo.example.office.in/ubuntu/
+    URIs: http://archive.ubuntu.com/ubuntu/
+    URIs: http://security.ubuntu.com/ubuntu/
+
+  git url rewrites (an insteadOf rule here means git traffic is redirected):
+
+==============================================================
+  9. Reachability -- confirming the air gap
+--------------------------------------------------------------
+
+  These SHOULD fail on an air-gapped office host.  A success here means
+  the host can reach GitHub, which contradicts the deployment assumption.
+
+    https://github.com         REACHABLE (HTTP 000000) -- unexpected, note this
+    https://pypi.org           REACHABLE (HTTP 000000) -- unexpected, note this
+
+==============================================================
+  10. Persistent data, models, configuration
+--------------------------------------------------------------
+  /home/kvmani/ml_platform/shared absent
+  /opt/ml_server/data          absent
+  /opt/ml_server/logs          absent
+  /opt/microseg/HydrideSegmentation/frozen_checkpoints 1.5M
+               1  /opt/microseg/HydrideSegmentation/frozen_checkpoints/candidates/.gitkeep
+         1465347  /opt/microseg/HydrideSegmentation/frozen_checkpoints/candidates/U_net_binary_best_checkpoint.pt
+               1  /opt/microseg/HydrideSegmentation/frozen_checkpoints/smoke/.gitkeep
+            1674  /opt/microseg/HydrideSegmentation/frozen_checkpoints/README.md
+               1  /opt/microseg/HydrideSegmentation/frozen_checkpoints/promoted/.gitkeep
+            4891  /opt/microseg/HydrideSegmentation/frozen_checkpoints/model_registry.json
+  /home/kvmani/ml_platform/shared/models absent
+
+  sqlite databases found under candidate roots:
+    /home/kvmani/ml_platform/src/ml_server/ml_server-main/data/engagement.sqlite3
+
+==============================================================
+  11. Reverse proxy
+--------------------------------------------------------------
+
+  nginx is not installed
+
+==============================================================
+  12. Resources
+--------------------------------------------------------------
+
+  disk:
+    Filesystem                         Size  Used Avail Use% Mounted on
+    tmpfs                              593M  1.5M  591M   1% /run
+    /dev/mapper/ubuntu--vg-ubuntu--lv   77G   29G   45G  40% /
+    tmpfs                              2.9G     0  2.9G   0% /dev/shm
+    tmpfs                              5.0M     0  5.0M   0% /run/lock
+    /dev/vda2                          2.0G  221M  1.6G  13% /boot
+    tmpfs                              593M  172K  593M   1% /run/user/1000
+
+  memory:
+                   total        used        free      shared  buff/cache   available
+    Mem:           5.8Gi       2.4Gi       1.4Gi       2.7Mi       2.3Gi       3.3Gi
+    Swap:          8.0Gi       322Mi       7.7Gi
+
+  cpu: 4 core(s)
+
+==============================================================
+  End of inventory
+--------------------------------------------------------------
+
+  Nothing on this host was modified.
+  Send this file back to the development machine to populate manifest.yml.
+
