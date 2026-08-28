@@ -531,6 +531,77 @@ tree_fingerprint() {
 # HTTP probes
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Pre-installed packages
+#
+# Some dependencies are put into the environment by hand, offline, because their
+# wheels are large and not available from the normal mirror. torch is the reason
+# this exists. They are verified rather than installed.
+# ---------------------------------------------------------------------------
+
+# installed_version <venv-python> <distribution> -- prints the version, or empty
+installed_version() {
+    local python_bin="$1" distribution="$2"
+    "$python_bin" - "$distribution" <<'PYEOF' 2>/dev/null || true
+import sys
+
+try:
+    from importlib.metadata import PackageNotFoundError, version
+    print(version(sys.argv[1]))
+except Exception:
+    print("")
+PYEOF
+}
+
+# check_preinstalled <venv-python> <resolved-requirements-or-empty> <pkg...>
+# Returns 1 and explains itself if any named package is absent.
+check_preinstalled() {
+    local python_bin="$1" resolved="$2"
+    shift 2
+    local missing=() package found pinned
+
+    for package in "$@"; do
+        [[ -n "$package" ]] || continue
+        found="$(installed_version "$python_bin" "$package")"
+        if [[ -z "$found" ]]; then
+            missing+=("$package")
+            continue
+        fi
+        ok "pre-installed ${package} ${found} found in the environment"
+        # The release was built and tested against a specific version. A
+        # different one is allowed -- it is the operator's deliberate choice --
+        # but silently differing from what was tested is worth saying out loud.
+        if [[ -n "$resolved" && -f "$resolved" ]]; then
+            pinned="$(sed -n "s/^${package}==\(.*\)$/\1/Ip" "$resolved" | head -1)"
+            if [[ -n "$pinned" && "$pinned" != "$found" ]]; then
+                warn "  this release was tested with ${package}==${pinned}; the host has ${found}"
+                warn "  the installed one will be kept and left untouched"
+            fi
+        fi
+    done
+
+    if (( ${#missing[@]} )); then
+        err "required package(s) are not installed in the deployment environment:"
+        local item
+        for item in "${missing[@]}"; do
+            err "    ${item}"
+        done
+        err ""
+        err "environment: ${python_bin%/bin/python}"
+        err ""
+        err "These are deliberately never installed or upgraded by this script:"
+        err "their wheels are large, are not served by the normal package mirror,"
+        err "and are expected to be installed once, by hand, on this host."
+        err ""
+        err "Install them offline into that environment, for example:"
+        err "    ${python_bin} -m pip install --no-index --find-links /path/to/wheels ${missing[*]}"
+        err ""
+        err "then re-run this update. Nothing has been changed."
+        return 1
+    fi
+    return 0
+}
+
 http_status() {
     # http_status <url> [timeout-seconds] -- prints 000 when unreachable.
     # curl already prints 000 on a connection failure AND exits non-zero, so the

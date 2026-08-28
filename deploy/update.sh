@@ -286,6 +286,32 @@ elif [[ "$ML_SYSTEMD_SCOPE" == "system" ]]; then
     have_sudo || die "systemd scope is 'system' but passwordless sudo is unavailable"
 fi
 
+# --- A9b. packages that must already be present ----------------------------
+#
+# Checked here, in preflight, so a missing torch stops the deployment before a
+# single byte is written rather than half way through the dependency install.
+
+PREINSTALLED=()
+while read -r package; do
+    [[ -n "$package" ]] && PREINSTALLED+=("$package")
+done < <(mf 'pip.preinstalled' 2>/dev/null || true)
+
+if (( ${#PREINSTALLED[@]} )); then
+    if [[ -x "${ML_VENV}/bin/python" ]]; then
+        # The release's own pinned list, read out of the archive for the
+        # version-comparison note only.
+        STAGE_RESOLVED="$(mktemp)"
+        on_cleanup "rm -f '${STAGE_RESOLVED}'"
+        tar -xzOf "$ARCHIVE" "${ARCHIVE_PREFIX}/requirements/resolved.txt" >"$STAGE_RESOLVED" 2>/dev/null || true
+        check_preinstalled "${ML_VENV}/bin/python" "$STAGE_RESOLVED" "${PREINSTALLED[@]}" \
+            || die "cannot proceed until the package(s) above are installed"
+    else
+        warn "the environment ${ML_VENV} does not exist yet and will be created"
+        warn "these package(s) must be installed into it by hand: ${PREINSTALLED[*]}"
+        warn "the deployment will stop and tell you so if they are still missing"
+    fi
+fi
+
 # --- A10. the plan ---------------------------------------------------------
 
 CHANGED_SERVICES=()
@@ -554,11 +580,49 @@ else
         log "no extra package index configured; using only the mirror in pip.conf"
     fi
 
+    # A freshly created environment still has to have the hand-installed
+    # packages put into it before anything can run. Say so now, clearly, rather
+    # than letting the services fail to start later.
+    if (( ${#PREINSTALLED[@]} )); then
+        check_preinstalled "${ML_VENV}/bin/python" "${TARGET_RELEASE}/requirements/resolved.txt" \
+            "${PREINSTALLED[@]}" \
+            || fail_and_rollback "required pre-installed package(s) are missing from ${ML_VENV}"
+    fi
+
     RESOLVED_REQ="${TARGET_RELEASE}/requirements/resolved.txt"
     if [[ -f "$RESOLVED_REQ" ]]; then
+        # Pre-installed packages are filtered out of the list pip is given, so
+        # that a version pinned by the release build can never override the one
+        # deliberately installed on this host -- which pip would otherwise try
+        # to download, and fail to, on an air-gapped machine.
+        INSTALL_REQ="$RESOLVED_REQ"
+        if (( ${#PREINSTALLED[@]} )); then
+            INSTALL_REQ="$(mktemp)"
+            on_cleanup "rm -f '${INSTALL_REQ}'"
+            python3 - "$RESOLVED_REQ" "$INSTALL_REQ" "${PREINSTALLED[@]}" <<'PYEOF'
+import re
+import sys
+
+source, destination = sys.argv[1], sys.argv[2]
+skip = {name.lower().replace("_", "-") for name in sys.argv[3:]}
+kept, dropped = [], []
+with open(source, encoding="utf-8") as handle:
+    for line in handle:
+        stripped = line.strip()
+        match = re.match(r"^([A-Za-z0-9_.-]+)\s*==", stripped)
+        if match and match.group(1).lower().replace("_", "-") in skip:
+            dropped.append(stripped)
+        else:
+            kept.append(line.rstrip("\n"))
+with open(destination, "w", encoding="utf-8", newline="\n") as handle:
+    handle.write("\n".join(kept) + "\n")
+for item in dropped:
+    print(f"    holding back {item} (already installed on this host)", file=sys.stderr)
+PYEOF
+        fi
         log "installing from requirements/resolved.txt (fully pinned by the release build)"
         if ! "${ML_VENV}/bin/python" -m pip install --disable-pip-version-check \
-                "${PIP_INDEX_ARGS[@]}" -r "$RESOLVED_REQ"; then
+                "${PIP_INDEX_ARGS[@]}" -r "$INSTALL_REQ"; then
             fail_and_rollback "dependency installation failed. The office pip mirror may be unreachable, or a
 pinned package may be missing from it. requirements/mirror_audit.txt in this release
 lists everything the mirror must carry."

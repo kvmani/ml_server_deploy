@@ -129,29 +129,48 @@ cat /etc/pip.conf          # must point at the internal mirror
 ./update.sh /path/to/ml-server-suite-vX.Y.Z.tar.gz
 ```
 
-### The torch index
+### PyTorch is never installed or upgraded by this script
 
-Hydride needs PyTorch, and the release pins it to a CPU-only build such as
-`torch==2.13.0+cpu`. That exact wheel exists only on a PyTorch CPU index — it is
-never on PyPI — so the install needs to be told where to find it. Point it at
-the office's internal mirror:
+`torch` and `torchvision` are expected to be already present in the deployment
+environment, installed once by hand, offline. The update **verifies** them and
+otherwise leaves them completely alone — it will not install, upgrade or
+downgrade them, and it will not try to download them.
 
-```bash
-export ML_PIP_EXTRA_INDEX_URL=http://pytorch-cpu.intranet.local/whl/cpu
-./update.sh /path/to/ml-server-suite-vX.Y.Z.tar.gz
+This matters because the release pins an exact version. pip treats
+`2.13.0+cpu` and `2.4.0+cpu` as different requirements, so without this rule an
+update would try to fetch one specific build and fail on an air-gapped host even
+though a perfectly good torch was already installed.
+
+If they are present, the update simply reports them and moves on:
+
+```
+[OK] pre-installed torch 2.13.0+cpu found in the environment
+     holding back torch==2.13.0+cpu (already installed on this host)
 ```
 
-or per-run:
+If the version differs from the one the release was tested against, you get a
+warning and the installed one is kept. That is your call to make, not the
+release's.
 
-```bash
-./update.sh <archive> --extra-index-url http://pytorch-cpu.intranet.local/whl/cpu
+If they are missing, the update stops in preflight, before changing anything,
+and tells you exactly where to put them:
+
+```
+ERROR required package(s) are not installed in the deployment environment:
+ERROR     torch
+ERROR environment: /home/kvmani/ml_platform/.venv
+ERROR Install them offline into that environment, for example:
+ERROR     /home/kvmani/ml_platform/.venv/bin/python -m pip install \
+ERROR         --no-index --find-links /path/to/wheels torch torchvision
 ```
 
-If your site mirror already serves the CPU torch wheels through the index in
-`/etc/pip.conf`, set `ML_PIP_EXTRA_INDEX_URL=""` so nothing else is contacted.
+Install them and re-run. Nothing was changed in the meantime.
 
 Never let this host install the default PyTorch wheels: they bundle the CUDA
 runtime, adding several gigabytes of GPU libraries to a machine with no GPU.
+
+To change which packages are treated this way, edit `pip.preinstalled` in the
+manifest and cut a new suite release.
 
 ### Hydride model checkpoints
 

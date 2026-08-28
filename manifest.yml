@@ -14,7 +14,7 @@
 # production release.
 
 schema: ml-suite.manifest.v1
-suite_version: 1.0.1
+suite_version: 1.0.2
 
 platform:
   os_id: ubuntu
@@ -81,6 +81,23 @@ shared_dirs:
 pip:
   extra_index_urls:
     - https://download.pytorch.org/whl/cpu
+
+  # Packages that are already installed in the office environment, by hand and
+  # offline, and that update.sh must therefore never install, upgrade or touch.
+  #
+  # torch is the case this exists for. Its CPU wheels are large, are not on
+  # PyPI, and were installed on the office server deliberately. resolved.txt
+  # pins an exact version, and pip treats "2.13.0+cpu" and "2.4.0+cpu" as
+  # different requirements -- so without this list an install would try to
+  # download a specific torch build and fail on an air-gapped host, even though
+  # a perfectly good torch was already present.
+  #
+  # These are verified to be present during preflight instead. A missing one
+  # stops the deployment before anything is changed, naming the environment it
+  # must be installed into.
+  preinstalled:
+    - torch
+    - torchvision
 
 environments:
   shared:

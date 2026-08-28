@@ -170,6 +170,11 @@ def build(out_dir: Path, version: str) -> Path:
 
     manifest["suite_version"] = version
 
+    # The rehearsal environment has no torch and needs none: the stubs are
+    # stdlib only. Clearing these keeps the fixture suite self-contained, and
+    # keeps the offline scenarios genuinely offline.
+    manifest["pip"] = {"extra_index_urls": [], "preinstalled": []}
+
     if out_dir.exists():
         shutil.rmtree(out_dir)
     sources = out_dir / "sources"
