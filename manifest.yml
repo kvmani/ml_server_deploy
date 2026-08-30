@@ -14,7 +14,7 @@
 # production release.
 
 schema: ml-suite.manifest.v1
-suite_version: 1.2.0
+suite_version: 1.3.0
 
 platform:
   os_id: ubuntu
@@ -197,7 +197,7 @@ services:
 
   pytex:
     repo: kvmani/pytex
-    ref: v0.3.0
+    ref: v0.4.0
     commit: ""
     dir: pytex
     import_check: pytex
