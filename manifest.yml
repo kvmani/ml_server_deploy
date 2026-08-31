@@ -14,7 +14,7 @@
 # production release.
 
 schema: ml-suite.manifest.v1
-suite_version: 1.3.0
+suite_version: 1.4.0
 
 platform:
   os_id: ubuntu
@@ -197,7 +197,7 @@ services:
 
   pytex:
     repo: kvmani/pytex
-    ref: v0.4.0
+    ref: v0.5.0
     commit: ""
     dir: pytex
     import_check: pytex
@@ -212,11 +212,13 @@ services:
     environment:
       PYTHONPATH: "{current}/apps/pytex/src"
     tests: "python -m pytest -q"
-    # pytex's suite covers its optional `adapters` integrations (pymatgen and
-    # friends), which are NOT part of the deployed environment. They are
-    # installed for the test run only, and never reach resolved.txt.
-    # See the note in mirror_notes about what this means for CBED features.
-    test_extras: [dev, adapters]
+    # PyTex 0.5.0 moved pymatgen, orix, diffsims, KikuchiPy, matplotlib and h5py
+    # out of its optional `adapters` extra and into its required dependencies,
+    # so the dependency gate picks them up from `[project] dependencies` like
+    # anything else and they reach resolved.txt and the office venv. There is no
+    # longer a set of features that works in test and raises in production;
+    # `dev` is all the test run needs on top.
+    test_extras: [dev]
 
   calculator:
     repo: kvmani/scientific_calculator
@@ -329,8 +331,13 @@ mirror_notes:
   - "The gateway's requirements.txt resolves pdf_tools and tabular_ml from
      GitHub archive URLs; build_suite.py rewrites those to local paths, because
      an air-gapped host cannot fetch them."
-  - "pytex's optional `adapters` extra (pymatgen, kikuchipy, orix, diffsims) is
-     NOT deployed. The features that need it -- notably some CBED symmetry
-     work -- will raise ModuleNotFoundError on the office server. Add those
-     packages to the pytex requirements here if users need them, after checking
-     the office mirror carries them."
+  - "PyTex 0.5.0 requires pymatgen, orix, diffsims, kikuchipy, matplotlib and
+     h5py, so they are now part of the deployed environment rather than an
+     extra that was left out of it. That closes the gap where CIF loading and
+     CBED symmetry raised ModuleNotFoundError on the office server while
+     working everywhere else. Their own transitive set is the thing to check
+     with IT: spglib, numba and llvmlite (pymatgen and kikuchipy), hyperspy and
+     its Rosettasciio readers (kikuchipy), and pillow, kiwisolver, fonttools,
+     contourpy and cycler (matplotlib). All are on PyPI as wheels; none needs a
+     compiler. requirements/mirror_audit.txt from the release build is the
+     authoritative list."
