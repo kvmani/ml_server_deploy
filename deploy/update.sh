@@ -378,15 +378,31 @@ fi
 # Sources may refer to the release being installed, the one being replaced, and
 # the newest checkpoint taken BEFORE this run -- which is the one that can still
 # hold a config file that has since been deleted from shared/.
+# Read by seed_expand() in lib/common.sh. ShellCheck's -x follows a `source`
+# into the sourced file but not the other way, so a variable set here and
+# read in there looks unused to it.
+# shellcheck disable=SC2034
 ML_SEED_RELEASE="$TARGET_RELEASE"
+# Read by seed_expand() in lib/common.sh. ShellCheck's -x follows a `source`
+# into the sourced file but not the other way, so a variable set here and
+# read in there looks unused to it.
+# shellcheck disable=SC2034
 ML_SEED_PREVIOUS="$(readlink -f "$CURRENT_LINK" 2>/dev/null || echo '')"
 # Guarded twice, and both guards are load-bearing under `set -euo pipefail`.
 # A fresh install has no backups/ at all, so `find` exits 1, pipefail promotes
 # that to a failure of the whole pipeline, and the deployment aborts before it
 # has done anything. That is every first deployment on a new host -- exactly
 # the case this seeding exists to serve.
+# Read by seed_expand() in lib/common.sh. ShellCheck's -x follows a `source`
+# into the sourced file but not the other way, so a variable set here and
+# read in there looks unused to it.
+# shellcheck disable=SC2034
 ML_SEED_BACKUP=""
 if [[ -d "${ML_ROOT}/backups" ]]; then
+    # Read by seed_expand() in lib/common.sh. ShellCheck's -x follows a `source`
+    # into the sourced file but not the other way, so a variable set here and
+    # read in there looks unused to it.
+    # shellcheck disable=SC2034
     ML_SEED_BACKUP="$(find "${ML_ROOT}/backups" -maxdepth 1 -mindepth 1 -type d -printf '%p\n' 2>/dev/null | sort -r | head -1 || true)"
 fi
 
@@ -741,6 +757,10 @@ ok "persistent state linked"
 # are in place by the time hydride is restarted and warm-loads its model.
 
 step "B4b. seeding persistent state"
+# Read by seed_expand() in lib/common.sh. ShellCheck's -x follows a `source`
+# into the sourced file but not the other way, so a variable set here and
+# read in there looks unused to it.
+# shellcheck disable=SC2034
 ML_SEED_RELEASE="$TARGET_RELEASE"
 seed_run apply
 ok "persistent state present"
