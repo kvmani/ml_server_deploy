@@ -770,3 +770,402 @@ wait_for_http() {
     done
     return 1
 }
+
+# ---------------------------------------------------------------------------
+# The intranet host.
+#
+# bind_host is what the sockets listen on; this is the address other machines
+# use to reach them, and therefore what the portal must put in the links it
+# renders. Conflating the two is what made every catalog link in v1.4.0 point
+# at 127.0.0.1: correct from the server itself, useless from every other desk.
+#
+# Prints the empty string when it cannot be determined, so every caller has to
+# decide what to do about that rather than silently inheriting a wrong answer.
+# ---------------------------------------------------------------------------
+
+detect_intranet_host() {
+    # detect_intranet_host [explicit-override]
+    local want="${1:-}"
+    if [[ -z "$want" ]]; then
+        want="${ML_INTRANET_HOST:-}"
+    fi
+    if [[ -z "$want" ]]; then
+        want="$(mf_or 'runtime.intranet_host' auto)"
+    fi
+    if [[ -n "$want" && "$want" != "auto" ]]; then
+        printf '%s' "$want"
+        return 0
+    fi
+
+    # The address on the interface holding the default route. That is the one
+    # the rest of the intranet reaches, which is the question being asked --
+    # `hostname -I` would answer with whichever NIC happens to be listed first.
+    local address=""
+    if have_cmd ip; then
+        address="$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.*[[:space:]]src[[:space:]]\([0-9.]\+\).*/\1/p' | head -1)"
+    fi
+    if [[ -z "$address" ]] && have_cmd hostname; then
+        address="$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v '^127\.' | grep -v '^$' | head -1)"
+    fi
+    printf '%s' "$address"
+}
+
+host_is_loopback() {
+    case "${1:-}" in
+        127.*|localhost|localhost.*|::1|0.0.0.0|"") return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Journal access.
+#
+# Reads only the CURRENT run of a unit -- everything since its
+# ActiveEnterTimestamp -- so an assertion about a fault this very deployment
+# fixed cannot be failed by a stale entry from before the restart.
+# ---------------------------------------------------------------------------
+
+unit_journal() {
+    # unit_journal <unit> [lines]
+    local unit="$1" lines="${2:-200}" since=""
+    have_cmd journalctl || return 0
+    since="$(sctl show "$unit" -p ActiveEnterTimestamp --value 2>/dev/null || true)"
+
+    local -a args=(--no-pager --output=cat -n "$lines" -u "$unit")
+    # An empty or epoch-zero timestamp means the unit has never been active, so
+    # there is no current run to bound the query with.
+    if [[ -n "$since" && "$since" != "0" ]]; then
+        args+=(--since "$since")
+    fi
+
+    case "${ML_SYSTEMD_SCOPE}" in
+        user)
+            ensure_user_bus 2>/dev/null || return 0
+            journalctl --user "${args[@]}" 2>/dev/null || true
+            ;;
+        system)
+            if have_sudo; then
+                sudo journalctl "${args[@]}" 2>/dev/null || true
+            else
+                journalctl "${args[@]}" 2>/dev/null || true
+            fi
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Seeding persistent state.
+#
+# shared_dirs creates empty directories; these helpers put into them the things
+# no release archive can carry -- the environment file, the site config, the
+# trained checkpoints, the sample micrographs.
+#
+# Two rules make this safe to run on every deployment, forever:
+#
+#   1. A target that is already populated is never touched. An operator's
+#      hand-edited env file survives every future upgrade byte for byte.
+#   2. Sources are read, never moved. Adopting the checkpoints out of
+#      /opt/microseg leaves /opt/microseg exactly as it was.
+#
+# The seed_* functions that copy or write are named for it and are called only
+# from update.sh, after preflight has already reported what they will do.
+# ---------------------------------------------------------------------------
+
+# Paths substituted into a seed's `sources`. update.sh sets these before it
+# calls anything below; the fallback makes an unset token expand to a path that
+# cannot exist rather than to a bare "/".
+ML_SEED_RELEASE=""
+ML_SEED_PREVIOUS=""
+ML_SEED_BACKUP=""
+
+seed_specs() {
+    # One record per seed, fields separated by U+001F (the unit separator):
+    #   id  kind  target  marker  required  generate  sources(|-separated)  why
+    #
+    # Not TAB. Tab is an IFS whitespace character, so `read` collapses a run of
+    # them and an empty field -- three of these four seeds have one -- shifts
+    # every field after it one place to the left. That parsed silently and
+    # wrongly, which is the worst way for a deployment to be wrong.
+    python3 - "$ML_MANIFEST" <<'PYEOF'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    document = json.load(handle)
+
+for entry in document.get("seeds") or []:
+    sources = "|".join(str(item) for item in (entry.get("sources") or []))
+    why = " ".join((entry.get("why") or "").split())
+    print("\x1f".join([
+        str(entry.get("id", "")),
+        str(entry.get("kind", "file")),
+        str(entry.get("target", "")),
+        str(entry.get("marker", "")),
+        "true" if entry.get("required") else "false",
+        str(entry.get("generate", "")),
+        sources,
+        why,
+    ]))
+PYEOF
+}
+
+seed_expand() {
+    # seed_expand <path-with-tokens>
+    local text="$1"
+    text="${text//\{root\}/$ML_ROOT}"
+    text="${text//\{release\}/${ML_SEED_RELEASE:-/nonexistent}}"
+    text="${text//\{previous\}/${ML_SEED_PREVIOUS:-/nonexistent}}"
+    text="${text//\{backup\}/${ML_SEED_BACKUP:-/nonexistent}}"
+    text="${text//\{home\}/$HOME}"
+    printf '%s' "$text"
+}
+
+seed_is_populated() {
+    # seed_is_populated <kind> <path> <marker>
+    #
+    # "Populated", not "exists". An empty frozen_checkpoints/ directory exists
+    # and satisfies nothing, and that distinction is the entire point of the
+    # `marker` field.
+    local kind="$1" path="$2" marker="$3"
+    case "$kind" in
+        file)
+            [[ -s "$path" ]]
+            ;;
+        tree)
+            [[ -d "$path" ]] || return 1
+            if [[ -n "$marker" ]]; then
+                [[ -e "${path}/${marker}" ]]
+            else
+                [[ -n "$(find "$path" -mindepth 1 -type f -print -quit 2>/dev/null)" ]]
+            fi
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+seed_pick_source() {
+    # seed_pick_source <kind> <marker> <sources-pipe-separated>
+    # Prints the first source that exists and is itself populated.
+    local kind="$1" marker="$2" sources="$3" candidate expanded
+    [[ -n "$sources" ]] || return 1
+    local IFS='|'
+    for candidate in $sources; do
+        [[ -n "$candidate" ]] || continue
+        expanded="$(seed_expand "$candidate")"
+        if seed_is_populated "$kind" "$expanded" "$marker"; then
+            printf '%s' "$expanded"
+            return 0
+        fi
+    done
+    return 1
+}
+
+seed_copy() {
+    # seed_copy <kind> <source> <target>   -- MUTATES
+    local kind="$1" source="$2" target="$3"
+    case "$kind" in
+        file)
+            mkdir -p "$(dirname "$target")" || return 1
+            cp -p "$source" "$target" || return 1
+            ;;
+        tree)
+            mkdir -p "$target" || return 1
+            # The trailing /. copies the CONTENTS, so an existing (empty)
+            # target directory is filled rather than nested inside itself.
+            cp -a "${source}/." "${target}/" || return 1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    return 0
+}
+
+# service_url_vars <host> [port-offset]
+#
+# "KEY<TAB>http://host:port" for every service declaring public_url_env. The
+# offset is applied so a staging root deployed with --port-offset advertises
+# the ports it actually listens on rather than production's.
+service_url_vars() {
+    local host="$1" offset="${2:-0}" id key port
+    while read -r id; do
+        key="$(svc "$id" public_url_env '')"
+        [[ -n "$key" ]] || continue
+        port="$(svc "$id" port '')"
+        [[ -n "$port" ]] || continue
+        printf '%s\thttp://%s:%s\n' "$key" "$host" "$(( port + offset ))"
+    done < <(service_ids)
+}
+
+seed_generate_service_urls() {
+    # seed_generate_service_urls <target> <host> [port-offset]   -- MUTATES
+    local target="$1" host="$2" offset="${3:-0}"
+    [[ -n "$host" ]] || return 1
+    mkdir -p "$(dirname "$target")" || return 1
+    {
+        printf '# ml-platform.env -- generated by deploy/update.sh on %s\n' "$(_ml_stamp)"
+        printf '#\n'
+        printf '# Loaded by systemd through EnvironmentFile= for the portal. These are the\n'
+        printf '# URLs the portal puts in the catalog, so they have to be addresses other\n'
+        printf '# machines on the intranet can reach -- not loopback.\n'
+        printf '#\n'
+        printf '# Safe to edit by hand. Nothing regenerates or overwrites this file once it\n'
+        printf '# exists: a later deployment only APPENDS a variable that is missing\n'
+        printf '# entirely, and never changes a value already in it.\n'
+        printf '#\n'
+        printf '# Host detected as: %s\n' "$host"
+        printf '\n'
+        service_url_vars "$host" "$offset" | while IFS=$'\t' read -r key value; do
+            printf '%s=%s\n' "$key" "$value"
+        done
+    } >"$target" || return 1
+    return 0
+}
+
+# seed_env_topup <file> <host> [port-offset]   -- MUTATES
+#
+# An env file adopted from the pre-suite install predates every variable added
+# since. Values already present are never touched -- they may have been set by
+# hand for good reasons -- but a variable absent ENTIRELY is appended, because
+# the alternative is the portal silently falling back to loopback for that one
+# service. Prints the names it added, one per line.
+seed_env_topup() {
+    local file="$1" host="$2" offset="${3:-0}" key value
+    local added=()
+    [[ -f "$file" && -n "$host" ]] || return 0
+    while IFS=$'\t' read -r key value; do
+        [[ -n "$key" ]] || continue
+        if ! grep -qE "^[[:space:]]*(export[[:space:]]+)?${key}=" "$file"; then
+            added+=("$key")
+            printf '%s=%s\n' "$key" "$value" >>"$file"
+        fi
+    done < <(service_url_vars "$host" "$offset")
+    (( ${#added[@]} )) || return 0
+    printf '%s\n' "${added[@]}"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Documentation built on this server.
+#
+# A component may render its own documentation here rather than shipping it.
+# PyTex is the case this exists for: it renders its Sphinx site into the
+# installed package, which works for a wheel and cannot work for this suite,
+# because application code is run from source over PYTHONPATH -- deliberately,
+# since that is what makes a rollback a symlink swap needing no network. The
+# built site is tens of megabytes of generated output and is git-ignored like
+# any other build product, so it reaches neither the component checkout nor the
+# release archive, and /docs answered 404 on this host for exactly that reason.
+#
+# Three properties make this safe to run on a production rollout, and all three
+# are load-bearing:
+#
+#   1. It runs after the deployment has succeeded, so nothing waits on it and a
+#      slow build costs no downtime.
+#   2. It cannot fail a deployment. Every failure path below warns and returns
+#      0; the worst outcome is the 404 the host had before.
+#   3. It is keyed to the component's commit, so a suite release that does not
+#      move the component reuses the existing build.
+#
+# The result lives in shared/ and is pointed at by an environment variable on
+# the service (PYTEX_DOCS_ROOT for PyTex), so it survives upgrades, rollbacks
+# and pruning.
+# ---------------------------------------------------------------------------
+
+docs_build_one() {
+    # docs_build_one <service-id> <release-dir>   -- MUTATES shared/, never the release
+    local id="$1" release="$2"
+    local target marker command timeout commit abs stamp built workdir tmp rendered src item
+    local -a req_args=()
+
+    target="$(mf_or "services.${id}.docs_build.target" '')"
+    command="$(mf_or "services.${id}.docs_build.command" '')"
+    [[ -n "$target" && -n "$command" ]] || return 0
+
+    marker="$(mf_or "services.${id}.docs_build.marker" 'index.html')"
+    timeout="$(mf_or "services.${id}.docs_build.timeout_seconds" '3600')"
+    commit="$(svc "$id" commit '')"
+    abs="${ML_ROOT}/${target}"
+    stamp="${abs}/.built-from"
+    workdir="${release}/apps/$(svc "$id" dir "$id")"
+    src="$(svc "$id" src '.')"
+
+    built=""
+    [[ -f "$stamp" ]] && built="$(<"$stamp")"
+    # The stamp, not merely the marker: a marker alone would go on serving the
+    # previous version's pages after an upgrade that did move the component.
+    if [[ -f "${abs}/${marker}" && -n "$commit" && "$built" == "$commit" ]]; then
+        ok "docs ${id}: already built from ${commit:0:12}"
+        return 0
+    fi
+
+    if [[ ! -d "$workdir" ]]; then
+        warn "docs ${id}: ${workdir} is not in this release; skipped"
+        return 0
+    fi
+
+    step "building documentation for ${id}"
+    log "this can take tens of minutes; the suite is already serving"
+
+    while read -r item; do
+        [[ -n "$item" ]] || continue
+        req_args+=("$item")
+    done < <(mf "services.${id}.docs_build.requirements" 2>/dev/null || true)
+
+    # Missing build dependencies are the ordinary case on a host whose mirror
+    # does not carry them, and they are not a deployment problem. Say so once,
+    # name what is needed, and leave.
+    if (( ${#req_args[@]} )); then
+        log "installing the documentation build dependencies"
+        # PIP_INDEX_ARGS belongs to update.sh; build_docs.sh sources only this
+        # library, so it is expanded in the form that tolerates being unset.
+        if ! ( cd "$workdir" && "${ML_VENV}/bin/python" -m pip install \
+                --disable-pip-version-check ${PIP_INDEX_ARGS[@]+"${PIP_INDEX_ARGS[@]}"} "${req_args[@]}" \
+                >>"${ML_LOG_FILE:-/dev/null}" 2>&1 ); then
+            warn "docs ${id}: the build dependencies could not be installed"
+            warn "  the mirror needs: ${req_args[*]}"
+            warn "  /docs answers 404 exactly as it did before; nothing else is affected"
+            warn "  install them and run deploy/build_docs.sh to finish the job"
+            return 0
+        fi
+    fi
+
+    # Rendered beside the target and swapped in, so a reader never meets a
+    # half-written tree and an interrupted build cannot destroy a good one.
+    tmp="${abs}.new"
+    rm -rf "$tmp"
+    mkdir -p "$(dirname "$abs")"
+    rendered="${command//\{target\}/$tmp}"
+    log "\$ ${rendered}"
+
+    if ! ( cd "$workdir" \
+            && PATH="${ML_VENV}/bin:${PATH}" \
+               PYTHONPATH="${workdir}/${src}" \
+               timeout "${timeout}s" bash -c "$rendered" \
+               >>"${ML_LOG_FILE:-/dev/null}" 2>&1 ); then
+        warn "docs ${id}: the build failed or exceeded ${timeout}s"
+        warn "  /docs keeps whatever it had; the deployment is unaffected"
+        [[ -n "${ML_LOG_FILE:-}" ]] && warn "  see ${ML_LOG_FILE}"
+        rm -rf "$tmp"
+        return 0
+    fi
+
+    if [[ ! -f "${tmp}/${marker}" ]]; then
+        warn "docs ${id}: the build produced no ${marker}, so it did not finish; discarded"
+        rm -rf "$tmp"
+        return 0
+    fi
+
+    printf '%s\n' "$commit" >"${tmp}/.built-from"
+    rm -rf "${abs}.old"
+    [[ -d "$abs" ]] && mv "$abs" "${abs}.old"
+    mv "$tmp" "$abs"
+    rm -rf "${abs}.old"
+    ok "docs ${id}: built into ${target} ($(du -sh "$abs" 2>/dev/null | cut -f1 || echo '?'))"
+    return 0
+}

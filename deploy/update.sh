@@ -7,6 +7,7 @@
 #   ./update.sh /path/to/ml-server-suite-v1.4.0.tar.gz
 #   ./update.sh <archive> --dry-run          # preflight and plan only, no changes
 #   ./update.sh <archive> --root /home/kvmani/ml_platform_staging --port-offset 100
+#   ./update.sh <archive> --intranet-host 10.20.30.40   # address other desks use
 #
 # The script is in two halves. Phase A verifies everything and prints a plan
 # while changing NOTHING, so it is safe to run against production at any time.
@@ -36,8 +37,15 @@ NO_DEPS=0
 HEALTH_WAIT=90
 EXTRA_INDEX_URLS=()
 EXTRA_INDEX_SET=0
+INTRANET_HOST_ARG=""
+# Documentation is built on this host once the deployment has succeeded; see
+# B12. --skip-docs is for a rollout that must finish quickly, or a host whose
+# mirror has none of the build dependencies; deploy/build_docs.sh does it
+# afterwards without redeploying anything.
+SKIP_DOCS=0
+ALLOW_MISSING_SEEDS=0
 
-usage() { sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0; }
+usage() { sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0; }
 
 while (( $# )); do
     case "$1" in
@@ -45,6 +53,9 @@ while (( $# )); do
         --systemd-scope) SCOPE_ARG="$2"; shift 2 ;;
         --port-offset)   PORT_OFFSET="$2"; shift 2 ;;
         --health-wait)   HEALTH_WAIT="$2"; shift 2 ;;
+        --intranet-host) INTRANET_HOST_ARG="$2"; shift 2 ;;
+        --skip-docs) SKIP_DOCS=1; shift ;;
+        --allow-missing-seeds) ALLOW_MISSING_SEEDS=1; shift ;;
         --extra-index-url) EXTRA_INDEX_URLS+=("$2"); EXTRA_INDEX_SET=1; shift 2 ;;
         --dry-run)       DRY_RUN=1; shift ;;
         --force)         FORCE=1; shift ;;
@@ -339,6 +350,142 @@ if (( ${#ALL_UNITS[@]} )); then
     check_unit_takeover "$(unit_dir)" "$ML_ROOT" "${ALL_UNITS[@]}"
 fi
 
+# --- A9d. persistent state that has to be seeded ---------------------------
+#
+# shared_dirs only makes empty directories. Everything that has to be INSIDE
+# them, and that no archive can carry, is declared in the manifest's `seeds`
+# section: the portal's environment file, the site config, the hydride
+# checkpoints, the sample micrographs.
+#
+# This resolves each one and reports what will happen, changing nothing. A
+# required seed that nothing on this host can supply stops the deployment HERE,
+# while the previous release is still serving and nothing has been touched --
+# rather than after activation, as a failed health check and a rollback.
+
+step "A9d. persistent state"
+
+INTRANET_HOST="$(detect_intranet_host "$INTRANET_HOST_ARG")"
+if [[ -z "$INTRANET_HOST" ]]; then
+    warn "could not determine this host's intranet address"
+    warn "the portal's links can only be generated with one; pass --intranet-host <ip>"
+elif host_is_loopback "$INTRANET_HOST"; then
+    warn "intranet address resolved to ${INTRANET_HOST}, which is loopback"
+    warn "links generated from it work on this machine and nowhere else; pass --intranet-host <ip>"
+else
+    log "intranet address: ${INTRANET_HOST} (services will be advertised on it)"
+fi
+
+# Sources may refer to the release being installed, the one being replaced, and
+# the newest checkpoint taken BEFORE this run -- which is the one that can still
+# hold a config file that has since been deleted from shared/.
+ML_SEED_RELEASE="$TARGET_RELEASE"
+ML_SEED_PREVIOUS="$(readlink -f "$CURRENT_LINK" 2>/dev/null || echo '')"
+# Guarded twice, and both guards are load-bearing under `set -euo pipefail`.
+# A fresh install has no backups/ at all, so `find` exits 1, pipefail promotes
+# that to a failure of the whole pipeline, and the deployment aborts before it
+# has done anything. That is every first deployment on a new host -- exactly
+# the case this seeding exists to serve.
+ML_SEED_BACKUP=""
+if [[ -d "${ML_ROOT}/backups" ]]; then
+    ML_SEED_BACKUP="$(find "${ML_ROOT}/backups" -maxdepth 1 -mindepth 1 -type d -printf '%p\n' 2>/dev/null | sort -r | head -1 || true)"
+fi
+
+SEED_UNSATISFIED=()
+
+# seed_run <plan|apply>
+#
+# One function for both phases so that what preflight promises and what Phase B
+# does cannot drift apart: they resolve each seed through exactly the same code.
+seed_run() {
+    local mode="$1"
+    SEED_UNSATISFIED=()
+    local id kind target marker required generate sources why abs source
+    local -a added
+    # U+001F, not TAB: see seed_specs() -- an empty field between two tabs
+    # would be swallowed and shift every field after it.
+    while IFS=$'\x1f' read -r id kind target marker required generate sources why; do
+        [[ -n "$id" ]] || continue
+        abs="${ML_ROOT}/${target}"
+
+        # Already there: never overwritten, in either mode.
+        if seed_is_populated "$kind" "$abs" "$marker"; then
+            log "  ${id}: ${target} already populated, left untouched"
+            # A file generated from the service list gains any variable that
+            # has been added to the suite since it was written. Existing values
+            # are never changed.
+            if [[ "$mode" == "apply" && "$generate" == "service_urls" && -n "$INTRANET_HOST" ]]; then
+                added=()
+                mapfile -t added < <(seed_env_topup "$abs" "$INTRANET_HOST" "$PORT_OFFSET")
+                if (( ${#added[@]} )); then
+                    warn "  ${id}: appended variable(s) missing from the existing file: ${added[*]}"
+                fi
+            fi
+            continue
+        fi
+
+        if source="$(seed_pick_source "$kind" "$marker" "$sources")"; then
+            if [[ "$mode" == "plan" ]]; then
+                log "  ${id}: ${target} is empty; will seed it from ${source}"
+            else
+                seed_copy "$kind" "$source" "$abs" \
+                    || fail_and_rollback "could not seed ${id} into ${target} from ${source}"
+                ok "  ${id}: seeded ${target} from ${source}"
+            fi
+            continue
+        fi
+
+        if [[ "$generate" == "service_urls" && -n "$INTRANET_HOST" ]]; then
+            if [[ "$mode" == "plan" ]]; then
+                log "  ${id}: ${target} is missing and no source exists; will generate it for ${INTRANET_HOST}"
+            else
+                seed_generate_service_urls "$abs" "$INTRANET_HOST" "$PORT_OFFSET" \
+                    || fail_and_rollback "could not generate ${target}"
+                ok "  ${id}: generated ${target} for ${INTRANET_HOST}"
+            fi
+            continue
+        fi
+
+        # Nothing on this host can supply it.
+        if [[ "$required" == "true" ]]; then
+            SEED_UNSATISFIED+=("${id}"$'\x1f'"${target}"$'\x1f'"${sources}"$'\x1f'"${why}")
+            err "  ${id}: ${target} is missing and nothing on this host can supply it"
+        else
+            warn "  ${id}: ${target} is empty and no source was found; continuing without it"
+            [[ -n "$why" ]] && warn "      ${why}"
+        fi
+    done < <(seed_specs)
+}
+
+seed_run plan
+
+if (( ${#SEED_UNSATISFIED[@]} )) && (( ! ALLOW_MISSING_SEEDS )); then
+    err ""
+    err "${#SEED_UNSATISFIED[@]} required piece(s) of persistent state cannot be supplied."
+    err "NOTHING HAS BEEN CHANGED; the running suite is untouched."
+    err ""
+    for entry in "${SEED_UNSATISFIED[@]}"; do
+        IFS=$'\x1f' read -r seed_id seed_target seed_sources seed_why <<<"$entry"
+        err "  ${seed_id}  ->  ${ML_ROOT}/${seed_target}"
+        [[ -n "$seed_why" ]] && err "      ${seed_why}"
+        err "      looked for it in:"
+        old_ifs="$IFS"; IFS='|'
+        for candidate in $seed_sources; do
+            [[ -n "$candidate" ]] || continue
+            err "        $(seed_expand "$candidate")"
+        done
+        IFS="$old_ifs"
+        err ""
+    done
+    err "Put the data at any one of those paths, or copy it straight into the"
+    err "target directory, and run this same command again. To deploy without it"
+    err "anyway -- accepting that the affected service will not work -- re-run"
+    err "with --allow-missing-seeds."
+    die "refusing to deploy without required persistent state"
+elif (( ${#SEED_UNSATISFIED[@]} )); then
+    warn "--allow-missing-seeds: continuing without ${#SEED_UNSATISFIED[@]} required item(s)"
+fi
+ok "persistent state accounted for"
+
 # --- A10. the plan ---------------------------------------------------------
 
 CHANGED_SERVICES=()
@@ -411,6 +558,10 @@ fi
 
 say ""
 say "  Persistent data in ${ML_ROOT}/shared is NOT touched by this update."
+say "  Anything missing from it is seeded, once, without overwriting."
+if [[ -n "$INTRANET_HOST" ]]; then
+    say "  Services will be advertised to the intranet on ${INTRANET_HOST}."
+fi
 say "==================================================================="
 say ""
 
@@ -475,6 +626,15 @@ if (( ! REDEPLOY_SAME )); then
     if [[ -x "${ML_VENV}/bin/python" ]]; then
         "${ML_VENV}/bin/python" -m pip freeze >"${BACKUP_DIR}/freeze.txt" 2>/dev/null || true
         log "recorded $(wc -l <"${BACKUP_DIR}/freeze.txt" 2>/dev/null || echo 0) installed package(s)"
+    fi
+
+    # The environment file and the site config are small, are not in git, and
+    # are the two things whose loss silently degrades the portal rather than
+    # stopping it. Checkpointing them makes backups/<stamp>/config a real seed
+    # source for a later run that finds shared/config empty.
+    if [[ -d "${ML_ROOT}/shared/config" ]]; then
+        mkdir -p "${BACKUP_DIR}/config"
+        find "${ML_ROOT}/shared/config" -maxdepth 1 -type f -exec cp -p {} "${BACKUP_DIR}/config/" \; 2>/dev/null || true
     fi
 
     UNIT_DIR="$(unit_dir)"
@@ -571,6 +731,19 @@ for key, value in (doc['services'][sys.argv[2]].get('shared_links') or {}).items
 " "${TARGET_RELEASE}/manifest.resolved.json" "$id")
 done < <(service_ids)
 ok "persistent state linked"
+
+# --- B4b. seed persistent state --------------------------------------------
+#
+# After B4, so the release's own directories are already symlinked at their
+# shared/ targets and seeding a target fills what the service will actually
+# read. Before B6, so the environment file exists by the time a unit that
+# declares EnvironmentFile= for it is written, and before B8, so the checkpoints
+# are in place by the time hydride is restarted and warm-loads its model.
+
+step "B4b. seeding persistent state"
+ML_SEED_RELEASE="$TARGET_RELEASE"
+seed_run apply
+ok "persistent state present"
 
 # --- B5. dependencies ------------------------------------------------------
 
@@ -756,6 +929,7 @@ expand_tokens() {
 render_unit() {
     local id="$1" out="$2"
     local unit port start workdir description wanted_by target commit
+    local env_file env_file_line=""
     unit="$(svc "$id" unit)"
     port="$(svc "$id" port)"
     port=$(( port + PORT_OFFSET ))
@@ -789,6 +963,17 @@ render_unit() {
         wants_line=$'\n'"Wants=${wants_list% }"
     fi
 
+    # EnvironmentFile=, when the service declares one. The path is resolved
+    # against the deployment root rather than the release, so it survives every
+    # upgrade and rollback; update.sh has already seeded it in B4b, so the
+    # directive can be the strict form that refuses to start without it.
+    env_file="$(svc "$id" env_file '')"
+    if [[ -n "$env_file" ]]; then
+        env_file="$(expand_tokens "$env_file" "$port")"
+        [[ "$env_file" == /* ]] || env_file="${ML_ROOT}/${env_file}"
+        env_file_line="EnvironmentFile=${env_file}"
+    fi
+
     # Environment= lines from the manifest.
     local env_lines="" key value
     while IFS=$'\t' read -r key value; do
@@ -812,6 +997,7 @@ for key, value in (doc['services'][sys.argv[2]].get('environment') or {}).items(
     text="${text//@AFTER@/$after_line}"
     text="${text//@WANTS@/$wants_line}"
     text="${text//@WORKDIR@/$workdir}"
+    text="${text//@ENVIRONMENT_FILE@/$env_file_line}"
     text="${text//@ENVIRONMENT@/$env_lines}"
     text="${text//@EXECSTART@/$start}"
     text="${text//@WANTED_BY@/$wanted_by}"
@@ -902,10 +1088,22 @@ fi
 
 step "B9. health checks"
 HEALTH_STATUS="failed"
+
+# This run's answer is passed down rather than letting the check work the
+# address out again. On a host with more than one interface, or when it was
+# given on the command line, the two could disagree, and the assertion would
+# then be about an address this deployment never used.
+HEALTH_ARGS=(--root "$ML_ROOT" --systemd-scope "$ML_SYSTEMD_SCOPE" --wait "$HEALTH_WAIT")
+[[ -n "$INTRANET_HOST" ]] && HEALTH_ARGS+=(--intranet-host "$INTRANET_HOST")
+# Waiving a required seed has to carry through to the assertions about it,
+# or --allow-missing-seeds gets past preflight and is refused by the health
+# check for the very condition it waived.
+(( ALLOW_MISSING_SEEDS )) && HEALTH_ARGS+=(--seeds-waived)
+
 if (( NO_RESTART )); then
     warn "skipping health checks because --no-restart was given"
     HEALTH_STATUS="skipped"
-elif "${SCRIPT_DIR}/health_check.sh" --root "$ML_ROOT" --systemd-scope "$ML_SYSTEMD_SCOPE" --wait "$HEALTH_WAIT"; then
+elif "${SCRIPT_DIR}/health_check.sh" "${HEALTH_ARGS[@]}"; then
     HEALTH_STATUS="ok"
     ok "health checks passed"
 else
@@ -935,6 +1133,26 @@ for rel in "${ALL_RELEASES[@]}"; do
     log "pruned old release ${rel}"
 done
 rm -rf "${TARGET_RELEASE}.superseded" 2>/dev/null || true
+
+# --- B12. documentation, built here ----------------------------------------
+#
+# Deliberately last, and deliberately incapable of failing the deployment.
+#
+# The suite is already serving: units are up, health checks have passed, the
+# release is recorded and old ones are pruned. This only adds a /docs route to a
+# workbench that is already working without one, which is what makes it
+# acceptable to spend tens of minutes here -- PyTex's site executes thirty-four
+# notebooks -- with nobody waiting on it.
+
+if (( SKIP_DOCS )); then
+    log "documentation build skipped (--skip-docs); deploy/build_docs.sh runs it later"
+else
+    while read -r doc_id; do
+        [[ -n "$doc_id" ]] || continue
+        [[ -n "$(mf_or "services.${doc_id}.docs_build.target" '')" ]] || continue
+        docs_build_one "$doc_id" "$TARGET_RELEASE" || true
+    done < <(service_ids)
+fi
 
 # --- done ------------------------------------------------------------------
 

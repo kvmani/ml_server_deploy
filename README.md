@@ -78,6 +78,48 @@ and transformers into the same venv as the portal. The release workflow runs
 `pip check` on the combined set as a blocking gate. If that ever goes red, set
 `env: isolated` on the hydride service in the manifest — one line, no redesign.
 
+## Documentation is built here, not shipped
+
+The workbench serves PyTex's theory notes, algorithm pages and worked examples
+at `/docs`, and on an air-gapped host there is nowhere else to read them. They
+are not in the archive: PyTex renders its site into its *installed package*, and
+this suite runs application code from source over `PYTHONPATH` so that a
+rollback stays a symlink swap needing no network. So the deployment builds them.
+
+A component declares a `docs_build` in the manifest, and `update.sh` runs it as
+its very last step — after the health checks have passed and the release has
+been recorded. Three properties follow, and every one of them is deliberate:
+
+- **Nothing waits on it.** The suite is already serving, which is what makes it
+  acceptable for the build to take tens of minutes.
+- **It cannot fail a deployment.** A missing Sphinx, an unreachable mirror, a
+  notebook that will not run: each is a warning, and `/docs` keeps what it had.
+- **It is not repeated needlessly.** The build is stamped with the component
+  commit it came from, so a suite release that does not move that component
+  reuses it.
+
+The result goes to `shared/docs/<component>`, outside every release, and the
+service is pointed at it by an environment variable. `deploy/build_docs.sh`
+does the same build on demand, against whatever is already deployed, without
+redeploying or restarting anything.
+
+## Persistent state is seeded, not assumed
+
+`shared_dirs` in the manifest creates empty directories. The `seeds` section
+says what has to be *in* them, and where to get it: the portal's environment
+file, the site config, the hydride checkpoints, the sample micrographs. Each is
+seeded once, from the first source that exists, and never overwritten
+afterwards — a hand-edited environment file survives every future upgrade.
+
+A seed marked `required` that nothing on the host can supply stops the
+deployment in preflight, with nothing changed, rather than after activation as
+a failed health check and a rollback.
+
+The `verify` section holds the post-deployment assertions: the catalog must not
+advertise loopback, and a service's journal must not contain the lines that
+mean it came up unable to do its job. Both exist because v1.4.0 passed every
+check the suite had at the time and was still broken for its users.
+
 ## Development
 
 Requires Python 3.12+ and PyYAML.

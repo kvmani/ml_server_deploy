@@ -14,7 +14,7 @@
 # production release.
 
 schema: ml-suite.manifest.v1
-suite_version: 1.4.0
+suite_version: 1.5.0
 
 platform:
   os_id: ubuntu
@@ -47,6 +47,27 @@ runtime:
   # rendered WantedBy this target to preserve that.
   systemd_target: ml-platform.target
 
+  # The address OTHER machines on the intranet use to reach this server.
+  #
+  # bind_host above is what the sockets listen on; this is what the portal must
+  # put in the links it renders. They are not the same thing, and conflating
+  # them is what produced the v1.4.0 symptom: every catalog link pointed at
+  # 127.0.0.1, which works perfectly from the server itself and is useless from
+  # any other desk.
+  #
+  #   auto   -- the address of the interface holding the default route
+  #   <ip>   -- a fixed address or hostname, when auto picks the wrong NIC
+  #
+  # Override per-run without editing this file:
+  #   ./update.sh <archive> --intranet-host 10.x.y.z
+  #   ML_INTRANET_HOST=10.x.y.z ./update.sh <archive>
+  intranet_host: auto
+
+  # Environment file rendered into EnvironmentFile= for services that name it
+  # in `env_file` below. It lives in shared/, so it survives every upgrade and
+  # rollback, and update.sh seeds it (see `seeds:`) before any unit is written.
+  env_file: shared/config/ml-platform.env
+
 # Persistent state lives here, outside every release directory, and is never
 # touched by update.sh or rollback.sh.
 shared_dirs:
@@ -57,6 +78,103 @@ shared_dirs:
   - logs
   - tmp
   - state
+  # Documentation built on this server (see `docs_build` under services). It
+  # lives here rather than inside a release because a release directory is
+  # replaced on every upgrade and removed on every prune, and rebuilding tens
+  # of minutes of Sphinx output on each deployment to produce identical pages
+  # is not a thing to do to an operator waiting for a rollout to finish.
+  - docs
+
+# Persistent state that must EXIST before the services are started, and that no
+# release archive can carry.
+#
+# shared_dirs above only creates empty directories. That is what produced three
+# separate v1.4.0 failures: the portal had no environment file so it fell back
+# to loopback links, hydride had an empty frozen_checkpoints/ so its warm load
+# could not resolve a model from the registry, and shared/config held no
+# config.intranet.json at all.
+#
+# Each entry below is seeded ONCE, from the first `sources` path that exists and
+# is itself populated, and is never overwritten afterwards -- so an operator's
+# hand-edited env file survives every subsequent upgrade untouched.
+#
+#   kind      file | tree
+#   target    path under the deployment root; always inside shared/
+#   marker    tree only: the file that proves the target is really populated,
+#             rather than merely existing. Empty means "any file counts".
+#   sources   searched in order. Tokens: {root} {release} {previous} {backup}
+#             {home}. {backup} is this run's checkpoint under backups/<stamp>.
+#   generate  a built-in generator to fall back on when no source exists:
+#               service_urls -- write KEY=http://<intranet_host>:<port> for every
+#                               service declaring `public_url_env` below
+#   required  true means preflight REFUSES the deployment when the target is
+#             absent and nothing can supply it, so the failure lands before
+#             anything has changed rather than as a health-check rollback.
+#             Override for a one-off with --allow-missing-seeds.
+seeds:
+  - id: portal-env
+    kind: file
+    target: shared/config/ml-platform.env
+    required: true
+    generate: service_urls
+    sources:
+      - "{backup}/config/ml-platform.env"
+      - "{root}/config/ml-platform.env"
+      - "{previous}/apps/ml_server/config/ml-platform.env"
+      - "{release}/apps/ml_server/config/ml-platform.env.example"
+    why: >-
+      The portal renders the catalog links other people click. Without these
+      variables it falls back to 127.0.0.1 and every link is dead from every
+      desk but this one. The pre-suite office unit loaded this file from
+      {root}/config/ml-platform.env, which is why that path is searched.
+
+  - id: server-config
+    kind: file
+    target: shared/config/config.intranet.json
+    required: false
+    sources:
+      - "{backup}/config/config.intranet.json"
+      - "{root}/config/config.intranet.json"
+      - "{previous}/apps/ml_server/config/config.intranet.json"
+      - "{release}/apps/ml_server/config/config.intranet.json"
+    why: >-
+      ML_SERVER_CONFIG points every gateway unit at this file. It holds site
+      settings and secrets that cannot be generated, so a missing one is a loud
+      warning rather than a refusal: the release template is copied when it
+      ships one, and otherwise the portal falls back to its built-in defaults.
+
+  - id: hydride-models
+    kind: tree
+    target: shared/models/hydride
+    marker: model_registry.json
+    required: true
+    sources:
+      - "{previous}/apps/HydrideSegmentation/frozen_checkpoints"
+      - /opt/microseg/HydrideSegmentation/frozen_checkpoints
+      - "{home}/ml_platform/src/hydride/HydrideSegmentation-main/frozen_checkpoints"
+    why: >-
+      The trained checkpoints are not in git -- frozen_checkpoints/ holds only
+      .gitkeep files -- so they can never travel in a release archive. The
+      pre-suite install kept them at /opt/microseg, and that is a real populated
+      copy on this host, so they are adopted from there on the first deployment
+      and live in shared/models/hydride from then on.
+
+  - id: hydride-test-library
+    kind: tree
+    target: shared/data/test_library
+    marker: ""
+    required: false
+    sources:
+      - "{previous}/apps/HydrideSegmentation/test_library"
+      - /opt/microseg/HydrideSegmentation/test_library
+      - "{home}/ml_platform/src/hydride/HydrideSegmentation-main/test_library"
+      - "{release}/apps/HydrideSegmentation/sample_images"
+    why: >-
+      Sample micrographs for the segmentation UI. Nothing can invent these, so
+      an empty library is a warning and not a failure: the service falls back to
+      its two built-in example images and says so in the journal. Drop a set of
+      .tif files into shared/data/test_library once and every future release
+      picks them up through the shared link.
 
 # How code is put on the path.
 #
@@ -176,6 +294,16 @@ services:
       {venv}/bin/gunicorn --bind {bind}:{port} --workers 2 --timeout 300
       ml_server.app.server:create_app()
     workdir: "{current}/apps/ml_server"
+    # Rendered as EnvironmentFile= in the unit. The pre-suite office unit had
+    # exactly this directive and the first suite-rendered one did not, which is
+    # the whole of root cause 1 in the v1.4.0 report: systemd started the portal
+    # with none of the *_URL variables set and it fell back to loopback links.
+    #
+    # Written as a hard EnvironmentFile=, not EnvironmentFile=-, deliberately:
+    # a portal that silently starts without its URLs looks healthy to every
+    # check on the host and is broken for every user. update.sh seeds the file
+    # in Phase B before it writes this unit, so it always exists.
+    env_file: shared/config/ml-platform.env
     environment:
       # pdf_tools and tabular_ml are imported in-process by the portal, so their
       # source trees must be on the gateway's path too.
@@ -197,7 +325,7 @@ services:
 
   pytex:
     repo: kvmani/pytex
-    ref: v0.5.0
+    ref: v0.8.1
     commit: ""
     dir: pytex
     import_check: pytex
@@ -205,19 +333,77 @@ services:
     env: shared
     requirements: []
     unit: ml-platform-pytex.service
+    # The variable the portal reads to link to this service from the catalog.
+    # generate: service_urls in `seeds` builds the env file out of these.
+    public_url_env: PYTEX_URL
     port: 8765
     health: /api/health
     start: "{venv}/bin/python -m pytex.app serve --host {bind} --port {port}"
     workdir: "{current}/apps/pytex"
     environment:
       PYTHONPATH: "{current}/apps/pytex/src"
+      # `docs_root()` checks this first, ahead of the copy a wheel would carry
+      # and ahead of any build lying in a checkout. It points at persistent
+      # state, so the documentation survives an upgrade, a rollback and a
+      # prune; when the directory does not exist the workbench simply answers
+      # 404 on /docs and everything else is unaffected.
+      PYTEX_DOCS_ROOT: "{root}/shared/docs/pytex"
     tests: "python -m pytest -q"
-    # PyTex 0.5.0 moved pymatgen, orix, diffsims, KikuchiPy, matplotlib and h5py
-    # out of its optional `adapters` extra and into its required dependencies,
-    # so the dependency gate picks them up from `[project] dependencies` like
-    # anything else and they reach resolved.txt and the office venv. There is no
-    # longer a set of features that works in test and raises in production;
-    # `dev` is all the test run needs on top.
+
+    # Documentation built on this server, after the suite is already up.
+    #
+    # PyTex renders its Sphinx site into the installed package, which works for
+    # a wheel and cannot work here: the suite runs application code from source
+    # over PYTHONPATH, deliberately, because that is what makes a rollback a
+    # symlink swap needing no network. The built site is ~55 MB of generated
+    # output and is git-ignored like any other build product, so it reaches
+    # neither the component checkout nor the release archive, and /docs has
+    # answered 404 on this host since the workbench gained the route.
+    #
+    # Building it here rather than shipping it keeps the archive small and the
+    # documentation matched to the exact commit deployed.
+    #
+    # Three properties make this safe to run on a production rollout:
+    #
+    #   1. It runs LAST, after health checks have passed and the deployment has
+    #      been recorded. The suite is already serving; this only adds a route.
+    #   2. It can never fail the deployment. A missing Sphinx, an unreachable
+    #      mirror, a notebook that will not execute -- each is a warning, and
+    #      /docs stays as it is today.
+    #   3. It is keyed to the component commit, so a suite release that does
+    #      not move PyTex reuses the build instead of repeating it.
+    #
+    # The cost when it does run is real: the site executes 34 notebooks, so
+    # allow tens of minutes. Nothing waits on it.
+    docs_build:
+      target: shared/docs/pytex
+      marker: index.html
+      command: "python scripts/build_docs_bundle.py --output {target}"
+      # Installed into the shared environment before the build. These are the
+      # only packages the office mirror needs for it; every scientific package
+      # the notebooks import is already a required PyTex dependency.
+      requirements: [".[docs]"]
+      timeout_seconds: 5400
+      why: >-
+        The workbench serves its own theory notes, algorithm pages and worked
+        examples at /docs. They are the reference an operator reads at the
+        bench, and on an air-gapped host there is nowhere else to read them.
+    # Dependencies are unchanged since 0.5.0, which moved pymatgen, orix,
+    # diffsims, KikuchiPy, matplotlib and h5py out of the optional `adapters`
+    # extra into the required set. The dependency gate picks them up from
+    # `[project] dependencies` like anything else, so they reach resolved.txt
+    # and the office venv, and `dev` is all the test run needs on top.
+    #
+    # v0.8.1 adds phase identification: the workbench can be given several
+    # candidate structures -- catalogue entries or .cif files -- and asked which
+    # of them a measured powder scan is, rather than being told the phase and
+    # asked to measure something about it. New pure-Python surface on the
+    # dependencies already deployed; nothing new to mirror.
+    #
+    # Its documentation is built on this server after the deployment; see
+    # `docs_build` below and the RUNBOOK. v0.8.1 is the first release whose
+    # bundle builder takes an --output, which is what lets that build write into
+    # shared/ instead of into the release tree.
     test_extras: [dev]
 
   calculator:
@@ -230,6 +416,9 @@ services:
     env: shared
     requirements: [requirements.txt]
     unit: ml-platform-calculator.service
+    # The variable the portal reads to link to this service from the catalog.
+    # generate: service_urls in `seeds` builds the env file out of these.
+    public_url_env: SCIENTIFIC_CALCULATOR_URL
     port: 5055
     health: /api/health
     start: "{venv}/bin/python app.py --host {bind} --port {port}"
@@ -248,6 +437,9 @@ services:
     env: shared
     requirements: [requirements.txt]
     unit: ml-platform-converter.service
+    # The variable the portal reads to link to this service from the catalog.
+    # generate: service_urls in `seeds` builds the env file out of these.
+    public_url_env: UNIT_CONVERTER_URL
     port: 5065
     health: /api/health
     start: "{venv}/bin/python app.py --host {bind} --port {port}"
@@ -306,6 +498,9 @@ services:
     env: shared                        # flip to `isolated` if the pip-check gate fails
     requirements: [requirements-web.txt]
     unit: ml-platform-hydride.service
+    # The variable the portal reads to link to this service from the catalog.
+    # generate: service_urls in `seeds` builds the env file out of these.
+    public_url_env: HYDRIDE_SEGMENTATION_URL
     port: 5005
     health: /health
     start: >-
@@ -319,7 +514,58 @@ services:
     # live in shared/models and are supplied to the server out of band, once.
     shared_links:
       frozen_checkpoints: shared/models/hydride
+      # The sample micrographs the segmentation UI offers for a trial run. The
+      # service looks for apps/HydrideSegmentation/test_library and falls back
+      # to two built-in examples when it is missing; linking it to shared/ means
+      # a library supplied once is there for every future release.
+      test_library: shared/data/test_library
     requires_models: true
+    # Checked after the restart: the link must resolve to a directory that
+    # really holds this file, not to the empty one the archive shipped.
+    model_registry: model_registry.json
+
+# Post-deployment assertions.
+#
+# health_check.sh runs these in addition to the unit, endpoint and route checks
+# it has always made. They exist because v1.4.0 passed every one of those and
+# was still broken for its users: all five units were active, every /health
+# returned 200, and the portal was advertising loopback URLs while hydride
+# served without a model.
+verify:
+  # Every standalone unit in `services` must report active. Listed explicitly
+  # so the assertion is visible here rather than only in the script.
+  units_must_be_active: true
+
+  # What the portal tells other machines to connect to.
+  catalog:
+    path: /api/catalog
+    # Checked only when the intranet host is known and is not itself loopback,
+    # so a laptop-bound test deployment does not fail on its own correct answer.
+    reject:
+      - "127.0.0.1"
+      - "localhost"
+      - "0.0.0.0"
+
+  # Journal assertions, read from each unit's CURRENT run only -- since its
+  # ActiveEnterTimestamp -- so a fault fixed by this very deployment cannot fail
+  # the check from a stale entry.
+  #
+  #   forbid    any match fails the check at `severity`
+  #   require   absence is only ever a warning: log wording belongs to the
+  #             component, and a quiet journal after --no-restart is not a fault
+  journal:
+    - service: hydride
+      severity: fail
+      lines: 500
+      forbid:
+        - "Warm load failed"
+        - "could not be resolved from the registry"
+      require: "Model preload finished"
+    - service: hydride
+      severity: warn
+      lines: 500
+      forbid:
+        - "Image library is unavailable"
 
 # Packages that must be installable from the office mirrors.  The release
 # workflow writes the fully resolved list to requirements/mirror_audit.txt; this
@@ -328,10 +574,16 @@ mirror_notes:
   - "torch and torchvision must come from a CPU-only index; the default wheels
      bundle the CUDA runtime and add several GB for no benefit on this host."
   - "poppler-utils (apt) provides pdftoppm, required by pdf2image for previews."
+  - "PyTex's `docs` extra -- sphinx, furo, myst-nb, myst-parser, sphinx-design,
+     sphinx-copybutton and sphinxcontrib-bibtex -- is needed only for the
+     on-server documentation build (`docs_build` on the pytex service). All are
+     pure-Python wheels on PyPI. Without them the build is skipped with a
+     warning and /docs answers 404; nothing else is affected, so this is the
+     one entry on this list that is optional."
   - "The gateway's requirements.txt resolves pdf_tools and tabular_ml from
      GitHub archive URLs; build_suite.py rewrites those to local paths, because
      an air-gapped host cannot fetch them."
-  - "PyTex 0.5.0 requires pymatgen, orix, diffsims, kikuchipy, matplotlib and
+  - "PyTex (pinned at v0.8.1) requires pymatgen, orix, diffsims, kikuchipy, matplotlib and
      h5py, so they are now part of the deployed environment rather than an
      extra that was left out of it. That closes the gap where CIF loading and
      CBED symmetry raised ModuleNotFoundError on the office server while

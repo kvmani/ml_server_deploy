@@ -42,6 +42,11 @@ GITHUB_API = "https://api.github.com"
 
 VALID_ENVS = {"shared", "isolated"}
 VALID_SCOPES = {"auto", "user", "system", "none"}
+VALID_SEED_KINDS = {"file", "tree"}
+# Generators update.sh knows how to run when no source for a seed exists.
+VALID_GENERATORS = {"", "service_urls"}
+VALID_SEVERITIES = {"fail", "warn"}
+ENV_VAR_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$")
@@ -96,6 +101,8 @@ def validate(document: dict[str, Any], *, require_commits: bool = False) -> list
 
     seen_ports: dict[int, str] = {}
     seen_units: dict[str, str] = {}
+    seen_url_vars: dict[str, str] = {}
+    declared_env_file = str(runtime.get("env_file") or "")
 
     for name, service in services.items():
         where = f"services.{name}"
@@ -146,17 +153,268 @@ def validate(document: dict[str, Any], *, require_commits: bool = False) -> list
             check(bool(service.get("start")), f"{where}.start is required for a standalone service")
             check(bool(service.get("workdir")), f"{where}.workdir is required for a standalone service")
 
+            # An environment file is rendered into the unit as a strict
+            # EnvironmentFile=, so a service that cannot start without it must
+            # point at the one place update.sh actually seeds. Two services
+            # quietly loading two different files is the sort of drift that is
+            # only ever discovered from a support call.
+            env_file = service.get("env_file")
+            if env_file is not None:
+                check(
+                    isinstance(env_file, str) and bool(env_file),
+                    f"{where}.env_file must be a non-empty path",
+                )
+                if isinstance(env_file, str):
+                    check(
+                        not env_file.startswith("/") or env_file == declared_env_file,
+                        f"{where}.env_file {env_file!r} is an absolute path outside the deployment root",
+                    )
+                    check(
+                        env_file.startswith("/") or env_file.startswith("shared/"),
+                        f"{where}.env_file {env_file!r} must live under shared/ so it survives upgrades",
+                    )
+                    if declared_env_file:
+                        check(
+                            env_file == declared_env_file,
+                            f"{where}.env_file {env_file!r} disagrees with runtime.env_file "
+                            f"{declared_env_file!r}",
+                        )
+
+            url_var = service.get("public_url_env")
+            if url_var is not None:
+                check(
+                    isinstance(url_var, str) and bool(ENV_VAR_RE.match(str(url_var))),
+                    f"{where}.public_url_env {url_var!r} is not an UPPER_SNAKE environment variable name",
+                )
+                if url_var in seen_url_vars:
+                    problems.append(
+                        f"{where}.public_url_env {url_var!r} collides with services.{seen_url_vars[str(url_var)]}"
+                    )
+                else:
+                    seen_url_vars[str(url_var)] = name
+
         health = str(service.get("health", ""))
         check(bool(health), f"{where}.health is required")
         check(health.startswith("/"), f"{where}.health {health!r} must be a path beginning with /")
 
     check("gateway" in services, "a 'gateway' service is required; it is the common portal")
 
+    problems.extend(_validate_seeds(document))
+    problems.extend(_validate_verify(document, services))
+    problems.extend(_validate_docs_build(document, services))
+
     # Anything mounted in-process must be reachable through the gateway, so the
     # gateway must actually be a standalone service that can serve it.
     for name, service in services.items():
         if isinstance(service, dict) and service.get("via") == "gateway":
             check("gateway" in services, f"services.{name} routes via the gateway, which is not defined")
+
+    return problems
+
+
+def _validate_docs_build(document: dict[str, Any], services: dict[str, Any]) -> list[str]:
+    """Check every `docs_build` block.
+
+    The build runs on the office server, after a deployment has already
+    succeeded, so a mistake here surfaces at the worst possible moment: on a
+    host with no network, in a step nobody is watching because the rollout has
+    been declared done. Every property that can be checked from the manifest is
+    therefore checked here instead.
+    """
+
+    problems: list[str] = []
+    shared_dirs = set(document.get("shared_dirs") or [])
+
+    for name, service in services.items():
+        if not isinstance(service, dict):
+            continue
+        spec = service.get("docs_build")
+        if spec is None:
+            continue
+        where = f"services.{name}.docs_build"
+
+        if not isinstance(spec, dict):
+            problems.append(f"{where} must be a mapping")
+            continue
+
+        target = str(spec.get("target") or "")
+        if not target:
+            problems.append(f"{where}.target is required")
+        elif not target.startswith("shared/"):
+            # The whole point is that the build outlives the release that
+            # produced it. A target inside one would be rebuilt on every
+            # deployment and lost on every prune.
+            problems.append(f"{where}.target {target!r} must be under shared/")
+        elif target.split("/")[1] not in shared_dirs:
+            problems.append(
+                f"{where}.target {target!r} is not under any directory in shared_dirs; "
+                f"nothing would create it"
+            )
+
+        command = str(spec.get("command") or "")
+        if not command:
+            problems.append(f"{where}.command is required")
+        elif "{target}" not in command:
+            # Without it the command would write wherever it defaults to, which
+            # for PyTex is inside the release tree -- the exact thing target
+            # exists to avoid, and it would appear to work.
+            problems.append(f"{where}.command must pass the build its destination via {{target}}")
+
+        if not str(spec.get("marker") or ""):
+            problems.append(
+                f"{where}.marker is required; without a file that proves the build "
+                f"finished, an interrupted one is indistinguishable from a good one"
+            )
+
+        timeout = spec.get("timeout_seconds", 0)
+        if not isinstance(timeout, int) or timeout <= 0:
+            problems.append(f"{where}.timeout_seconds must be a positive integer")
+
+        requirements = spec.get("requirements") or []
+        if not isinstance(requirements, list) or not all(isinstance(i, str) for i in requirements):
+            problems.append(f"{where}.requirements must be a list of pip arguments")
+
+        if not str(spec.get("why") or "").strip():
+            problems.append(f"{where} must explain itself in `why`")
+
+        # The service has to be able to find what was built, or the build is
+        # tens of minutes of work nothing reads.
+        environment = service.get("environment") or {}
+        pointer = "{root}/" + target
+        if pointer not in environment.values():
+            problems.append(
+                f"{where}.target is not referenced by any environment variable of "
+                f"services.{name}; the service would never find the build. Expected "
+                f"one variable set to {pointer!r}."
+            )
+
+    return problems
+
+
+def _validate_seeds(document: dict[str, Any]) -> list[str]:
+    """Check the `seeds` section.
+
+    These entries are the difference between a deployment that works and one
+    that comes up empty, and a typo in a target path fails silently -- update.sh
+    would happily seed a directory nothing reads.  So the shape is checked here,
+    on the development machine, rather than discovered in a maintenance window.
+    """
+    problems: list[str] = []
+    seeds = document.get("seeds") or []
+    if not isinstance(seeds, list):
+        return ["seeds must be a list"]
+
+    shared_dirs = {str(item) for item in (document.get("shared_dirs") or [])}
+    seen: dict[str, int] = {}
+
+    for index, entry in enumerate(seeds):
+        where = f"seeds[{index}]"
+        if not isinstance(entry, dict):
+            problems.append(f"{where} must be a mapping")
+            continue
+
+        seed_id = str(entry.get("id") or "")
+        if not seed_id:
+            problems.append(f"{where}.id is required")
+        elif seed_id in seen:
+            problems.append(f"{where}.id {seed_id!r} duplicates seeds[{seen[seed_id]}]")
+        else:
+            seen[seed_id] = index
+
+        kind = str(entry.get("kind") or "file")
+        if kind not in VALID_SEED_KINDS:
+            problems.append(f"{where}.kind must be one of {sorted(VALID_SEED_KINDS)}, got {kind!r}")
+
+        target = str(entry.get("target") or "")
+        if not target:
+            problems.append(f"{where}.target is required")
+        elif not target.startswith("shared/"):
+            # Anywhere else is inside a release directory, which the next
+            # upgrade replaces -- so seeding it would silently lose the data.
+            problems.append(f"{where}.target {target!r} must be under shared/")
+        elif target.split("/")[1] not in shared_dirs:
+            problems.append(
+                f"{where}.target {target!r} is not under any directory in shared_dirs; "
+                f"nothing would create it"
+            )
+
+        if kind == "file" and entry.get("marker"):
+            problems.append(f"{where}.marker applies to a tree, not to a file")
+
+        generate = str(entry.get("generate") or "")
+        if generate not in VALID_GENERATORS:
+            problems.append(f"{where}.generate must be one of {sorted(VALID_GENERATORS - {''})}, got {generate!r}")
+
+        sources = entry.get("sources") or []
+        if not isinstance(sources, list) or not all(isinstance(item, str) for item in sources):
+            problems.append(f"{where}.sources must be a list of paths")
+            sources = []
+        if not sources and not generate:
+            problems.append(f"{where} has neither sources nor a generator, so it can never be satisfied")
+
+        # A required seed with no generator can only ever be satisfied from a
+        # source, and preflight refuses the whole deployment when it is not
+        # there.  Declaring one with no `why` leaves the operator holding a
+        # refusal and no idea what to put where.
+        if entry.get("required") and not str(entry.get("why") or "").strip():
+            problems.append(f"{where} is required, so it must explain itself in `why`")
+
+    return problems
+
+
+def _validate_verify(document: dict[str, Any], services: dict[str, Any]) -> list[str]:
+    """Check the `verify` section: the post-deployment assertions."""
+    problems: list[str] = []
+    verify = document.get("verify") or {}
+    if not isinstance(verify, dict):
+        return ["verify must be a mapping"]
+
+    catalog = verify.get("catalog") or {}
+    if catalog:
+        if not isinstance(catalog, dict):
+            problems.append("verify.catalog must be a mapping")
+        else:
+            path = str(catalog.get("path") or "")
+            if not path.startswith("/"):
+                problems.append(f"verify.catalog.path {path!r} must be a path beginning with /")
+            reject = catalog.get("reject") or []
+            if not isinstance(reject, list) or not reject:
+                problems.append("verify.catalog.reject must be a non-empty list")
+
+    journal = verify.get("journal") or []
+    if not isinstance(journal, list):
+        return problems + ["verify.journal must be a list"]
+
+    for index, entry in enumerate(journal):
+        where = f"verify.journal[{index}]"
+        if not isinstance(entry, dict):
+            problems.append(f"{where} must be a mapping")
+            continue
+
+        service = str(entry.get("service") or "")
+        if service not in services:
+            problems.append(f"{where}.service {service!r} is not a service in this manifest")
+        elif services[service].get("in_process"):
+            # No unit of its own, so no journal of its own.
+            problems.append(f"{where}.service {service!r} runs in-process and has no journal")
+
+        severity = str(entry.get("severity") or "fail")
+        if severity not in VALID_SEVERITIES:
+            problems.append(f"{where}.severity must be one of {sorted(VALID_SEVERITIES)}, got {severity!r}")
+
+        forbid = entry.get("forbid") or []
+        if isinstance(forbid, str):
+            forbid = [forbid]
+        if not isinstance(forbid, list) or not forbid:
+            problems.append(f"{where}.forbid must list at least one line that must not appear")
+        elif any("|" in str(item) for item in forbid):
+            # The shell side joins these with a pipe to cross the process
+            # boundary, so one inside a pattern would split it in half.
+            problems.append(f"{where}.forbid may not contain '|'")
+
+        lines = entry.get("lines", 200)
+        if not isinstance(lines, int) or lines <= 0:
+            problems.append(f"{where}.lines must be a positive integer")
 
     return problems
 

@@ -419,6 +419,149 @@ scenario_data_survives() {
         test -f "${root}/current/apps/HydrideSegmentation/frozen_checkpoints/checkpoint.pt"
 }
 
+# The three v1.4.0 failures, each of which passed every check the suite had at
+# the time: a portal with no environment file advertising loopback links, an
+# empty checkpoint directory behind a healthy hydride, and a missing
+# config.intranet.json nobody noticed until a support call.
+
+scenario_seeded_state() {
+    local root archive env_file unit_file catalog
+    root="$(new_root seeded_state)"
+    archive="$(build_archive 1.0.0)" || return 1
+
+    # A fake intranet address: distinguishable from the loopback fallback the
+    # portal uses when it has no environment file at all, which is the entire
+    # point -- with 127.0.0.1 the correct and the broken answer are identical.
+    local host="10.255.255.1"
+    local output
+    output="$(update "$root" "$archive" --intranet-host "$host" 2>&1)" \
+        || { fail "install with seeding failed"; info "$output"; return 1; }
+
+    env_file="${root}/shared/config/ml-platform.env"
+    assert "the environment file was created in shared/" test -s "$env_file"
+    assert "it carries every service URL" bash -c \
+        "grep -q '^PYTEX_URL=http://${host}:$(rport 8765)\$' '${env_file}' &&
+         grep -q '^HYDRIDE_SEGMENTATION_URL=http://${host}:$(rport 5005)\$' '${env_file}' &&
+         grep -q '^SCIENTIFIC_CALCULATOR_URL=' '${env_file}' &&
+         grep -q '^UNIT_CONVERTER_URL=' '${env_file}'"
+
+    unit_file="${HOME}/.config/systemd/user/$(runit portal)"
+    assert "the portal unit loads it" bash -c \
+        "grep -qF 'EnvironmentFile=${env_file}' '${unit_file}'"
+    assert "and not the tolerant form that would start without it" bash -c \
+        "! grep -q '^EnvironmentFile=-' '${unit_file}'"
+
+    # The assertion that actually matters: the variables reached the process.
+    catalog="$(curl -s --max-time 5 "http://127.0.0.1:$(rport 5000)/api/catalog")"
+    assert_contains "the catalog advertises the intranet address" "$catalog" "$host"
+    if [[ "$catalog" == *"127.0.0.1"* ]]; then
+        fail "the catalog still advertises loopback: ${catalog}"
+        ASSERT_FAILURES=$(( ASSERT_FAILURES + 1 ))
+    else
+        pass "no loopback address survives in the catalog"
+    fi
+
+    # Checkpoints, adopted from outside the release and reachable through it.
+    assert "the model registry was seeded into shared/" \
+        test -s "${root}/shared/models/hydride/model_registry.json"
+    assert "and resolves from inside the release" \
+        test -s "${root}/current/apps/HydrideSegmentation/frozen_checkpoints/model_registry.json"
+    assert "the checkpoint came with it" \
+        test -s "${root}/shared/models/hydride/promoted/fixture.pt"
+
+    assert "hydride reported a successful preload" bash -c \
+        "journalctl --user -u '$(runit hydride)' -n 200 --no-pager 2>/dev/null | grep -q 'Model preload finished'"
+    assert "and no warm-load failure" bash -c \
+        "! journalctl --user -u '$(runit hydride)' -n 200 --no-pager 2>/dev/null | grep -q 'Warm load failed'"
+
+    assert "health_check.sh passes with the assertions enabled" \
+        "${REPO_ROOT}/deploy/health_check.sh" --root "$root" --systemd-scope user --intranet-host "$host"
+}
+
+scenario_seed_is_not_overwritten() {
+    local root a1 a2 env_file
+    root="$(new_root seed_is_not_overwritten)"
+    a1="$(build_archive 1.0.0)" || return 1
+    a2="$(build_archive 1.1.0)" || return 1
+
+    update "$root" "$a1" --intranet-host 10.255.255.1 >/dev/null 2>&1 \
+        || { fail "baseline install failed"; return 1; }
+
+    # An operator edits the file by hand, as they are meant to be able to.
+    env_file="${root}/shared/config/ml-platform.env"
+    printf 'PYTEX_URL=http://pytex.example.office.in\n' >"$env_file"
+    printf 'SITE_BANNER=Maintenance window Friday\n'    >>"$env_file"
+    local before; before="$(sha256sum "$env_file" | cut -d' ' -f1)"
+
+    update "$root" "$a2" --intranet-host 10.255.255.1 >/dev/null 2>&1 \
+        || { fail "upgrade failed"; return 1; }
+
+    # The three variables the hand-written file lacks are appended, because a
+    # missing one silently becomes a loopback link -- but nothing already in
+    # the file may be touched.
+    assert "the hand-written value survives" bash -c \
+        "grep -q '^PYTEX_URL=http://pytex.example.office.in\$' '${env_file}'"
+    assert "the unrelated hand-written setting survives" bash -c \
+        "grep -q '^SITE_BANNER=Maintenance window Friday\$' '${env_file}'"
+    assert "PYTEX_URL was not duplicated" bash -c \
+        "test \"\$(grep -c '^PYTEX_URL=' '${env_file}')\" = 1"
+    assert "the missing variables were appended" bash -c \
+        "grep -q '^HYDRIDE_SEGMENTATION_URL=' '${env_file}'"
+    if [[ "$before" == "$(sha256sum "$env_file" | cut -d' ' -f1)" ]]; then
+        fail "nothing was appended at all; a new service would never get a URL"
+        ASSERT_FAILURES=$(( ASSERT_FAILURES + 1 ))
+    else
+        pass "the file was appended to, not rewritten"
+    fi
+
+    # Third run, nothing left to add: seeding has to be idempotent or every
+    # upgrade would grow the file.
+    local after_two; after_two="$(sha256sum "$env_file" | cut -d' ' -f1)"
+    update "$root" "$a2" --intranet-host 10.255.255.1 --force >/dev/null 2>&1 || true
+    assert_eq "a further deployment changes nothing" "$after_two" \
+        "$(sha256sum "$env_file" | cut -d' ' -f1)"
+}
+
+scenario_missing_checkpoints() {
+    local root archive before output rc=0
+    root="$(new_root missing_checkpoints)"
+
+    # The checkpoints are not in git and cannot travel in the archive. This is
+    # the office server on the day nobody has copied them anywhere yet.
+    cat >"${WORK}/no_checkpoints.py" <<'MUTATOR'
+import sys
+from pathlib import Path
+
+import yaml
+
+manifest_path = Path(sys.argv[1])
+document = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+for seed in document.get("seeds") or []:
+    if seed.get("id") == "hydride-models":
+        seed["sources"] = ["/nonexistent/frozen_checkpoints"]
+manifest_path.write_text(
+    yaml.safe_dump(document, sort_keys=False, default_flow_style=False),
+    encoding="utf-8", newline="\n",
+)
+MUTATOR
+    archive="$(build_archive 1.0.0 "${WORK}/no_checkpoints.py")" || return 1
+
+    before="$(fingerprint "$root")"
+    output="$(update "$root" "$archive" 2>&1)" || rc=$?
+    assert "update.sh refuses to deploy without the checkpoints" test "$rc" -ne 0
+    assert_contains "it says nothing was changed" "$output" "NOTHING HAS BEEN CHANGED"
+    assert_contains "it names the paths it looked in" "$output" "/nonexistent/frozen_checkpoints"
+    assert_contains "it offers the override" "$output" "--allow-missing-seeds"
+    assert_eq "and the root really is untouched" "$before" "$(fingerprint "$root")"
+
+    # The override is a deliberate choice, and it must work.
+    assert "--allow-missing-seeds deploys anyway" \
+        update "$root" "$archive" --allow-missing-seeds --health-wait 20
+    assert_eq "the suite is active" "1.0.0" "$(active_version "$root")"
+    assert "but shared/models/hydride is still empty" bash -c \
+        "! test -s '${root}/shared/models/hydride/model_registry.json'"
+}
+
 scenario_rollback_bad_release() {
     local root a1 a2
     root="$(new_root rollback_bad_release)"
@@ -809,6 +952,79 @@ MUTATOR
     rm -f "${SHIMS}/definitely-not-installed-anywhere"
 }
 
+scenario_docs_build() {
+    # The documentation is built on the server, after the deployment, into
+    # persistent state -- and is not rebuilt when nothing moved.
+    local root archive docs stamp first
+    root="$(new_root docs_build)"
+    archive="$(build_archive 1.0.0)" || return 1
+
+    local output
+    output="$(update "$root" "$archive" 2>&1)" \
+        || { fail "install failed"; info "$output"; return 1; }
+
+    docs="${root}/shared/docs/pytex"
+    stamp="${docs}/.built-from"
+    assert "the documentation was built into shared/" test -s "${docs}/index.html"
+    assert "it came from this release" bash -c \
+        "grep -q 'pytex 1.0.0' '${docs}/index.html'"
+    assert "the build is stamped with the component commit" test -s "$stamp"
+    assert_contains "the deployment says it built them" "$output" "docs pytex: built into"
+
+    # Persistent, not inside the release: a prune or a rollback must not take
+    # the documentation with it.
+    assert "it is outside every release directory" bash -c \
+        "[[ '${docs}' != *'/releases/'* ]]"
+
+    # Redeploying the same component must not repeat tens of minutes of work.
+    first="$(stat -c %Y "${docs}/index.html")"
+    output="$(update "$root" "$archive" 2>&1)" \
+        || { fail "second install failed"; info "$output"; return 1; }
+    assert_contains "an unchanged component reuses the build" "$output" "already built from"
+    assert "and really did not rebuild it" bash -c \
+        "[[ \"\$(stat -c %Y '${docs}/index.html')\" == '${first}' ]]"
+}
+
+scenario_docs_build_never_fails_a_deployment() {
+    # The whole reason it runs last. A documentation build is not a service, and
+    # a broken one must cost a rollout nothing.
+    local root archive
+    root="$(new_root docs_fail)"
+    archive="$(build_archive 1.0.0)" || return 1
+
+    local output
+    output="$(ML_FIXTURE_DOCS_FAIL=1 update "$root" "$archive" 2>&1)" \
+        || { fail "a failing documentation build took the deployment down with it"; info "$output"; return 1; }
+    pass "the deployment succeeds anyway"
+    assert_contains "and says what happened" "$output" "the build failed"
+    assert "no half-written tree was left behind" bash -c \
+        "[[ ! -e '${root}/shared/docs/pytex.new' ]]"
+    assert "the suite is active" bash -c \
+        "[[ -L '${root}/current' ]]"
+
+    # And the operator can finish the job afterwards without redeploying.
+    "${REPO_ROOT}/deploy/build_docs.sh" --root "$root" --systemd-scope user >/dev/null 2>&1 \
+        || true
+    assert "deploy/build_docs.sh builds them later" test -s "${root}/shared/docs/pytex/index.html"
+}
+
+scenario_docs_skipped_on_request() {
+    local root archive
+    root="$(new_root docs_skip)"
+    archive="$(build_archive 1.0.0)" || return 1
+
+    local output
+    output="$(update "$root" "$archive" --skip-docs 2>&1)" \
+        || { fail "install with --skip-docs failed"; info "$output"; return 1; }
+    assert_contains "it says it skipped them" "$output" "documentation build skipped"
+    assert "and built nothing" bash -c \
+        "[[ ! -e '${root}/shared/docs/pytex/index.html' ]]"
+
+    "${REPO_ROOT}/deploy/build_docs.sh" --root "$root" --systemd-scope user >/dev/null 2>&1 || true
+    assert "build_docs.sh then produces them" test -s "${root}/shared/docs/pytex/index.html"
+}
+
+
 scenario_dry_run() {
     local root archive before
     root="$(new_root dry_run)"
@@ -849,6 +1065,12 @@ SCENARIOS=(
     single_component
     idempotent
     data_survives
+    seeded_state
+    seed_is_not_overwritten
+    docs_build
+    docs_build_never_fails_a_deployment
+    docs_skipped_on_request
+    missing_checkpoints
     rollback_bad_release
     manual_rollback
     unit_takeover

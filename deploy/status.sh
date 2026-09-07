@@ -145,6 +145,18 @@ while read -r id; do
 done < <(service_ids)
 
 say ""
+printf '  advertised on    %s\n' "$(detect_intranet_host)"
+ENV_FILE="$(mf_or 'runtime.env_file' '')"
+if [[ -n "$ENV_FILE" ]]; then
+    if [[ -s "${ML_ROOT}/${ENV_FILE}" ]]; then
+        printf '  environment      %s  (%s variable(s))\n' "$ENV_FILE" \
+            "$(grep -cE '^[[:space:]]*(export[[:space:]]+)?[A-Z][A-Z0-9_]*=' "${ML_ROOT}/${ENV_FILE}" || true)"
+    else
+        printf '  environment      %s  MISSING -- the portal will link to loopback\n' "$ENV_FILE"
+    fi
+fi
+
+say ""
 say "  Persistent state (survives every upgrade and rollback)"
 say "  ---------------------------------------------------------------"
 while read -r dir; do
@@ -158,6 +170,17 @@ while read -r dir; do
         printf '  %-12s %s\n' "$dir" "missing"
     fi
 done < <(mf '.shared_dirs')
+
+while IFS=$'\x1f' read -r seed_id seed_kind seed_target seed_marker seed_required _rest; do
+    [[ -n "$seed_id" ]] || continue
+    if seed_is_populated "$seed_kind" "${ML_ROOT}/${seed_target}" "$seed_marker"; then
+        printf '  %-12s %s\n' "$seed_id" "ok"
+    elif [[ "$seed_required" == "true" ]]; then
+        printf '  %-12s %s\n' "$seed_id" "MISSING (${seed_target})"
+    else
+        printf '  %-12s %s\n' "$seed_id" "empty (${seed_target})"
+    fi
+done < <(seed_specs)
 
 say ""
 say "  Releases present"

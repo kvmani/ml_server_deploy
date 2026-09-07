@@ -110,6 +110,9 @@ systemctl --user status  ml-platform-pytex.service
 | `another deployment is already running` | Two updates at once | Wait for the first to finish |
 | `the user systemd session is unavailable` | Linger is off, or you are on a bare SSH session | `loginctl enable-linger kvmani`, then log out and back in |
 | `health checks failed` | The new release came up but does not work | It rolled back automatically. The failed release is kept under `releases/` for diagnosis |
+| `refusing to deploy without required persistent state` | Something the suite needs is not on this host and cannot be generated — normally the hydride checkpoints | Nothing was changed. The message lists every path it looked in; put the data at one of them and re-run. See "Persistent state" below |
+| `advertises 127.0.0.1 instead of ...` | The portal is serving links nobody else can follow | The environment file was missing or not loaded. Check `~/ml_platform/shared/config/ml-platform.env` and re-run the update |
+| `journal reports: Warm load failed` | Hydride is running but resolved no model | `shared/models/hydride` is empty or has no `model_registry.json`. Seed it and restart |
 
 ---
 
@@ -202,16 +205,170 @@ manifest and cut a new suite release.
 ### Hydride model checkpoints
 
 The trained checkpoints are **not** in the release archive and never will be —
-they are not in git either. They live outside the releases, and are copied in
-once:
+they are not in git either. They live in `shared/models/hydride`, outside every
+release, and the update seeds them for you on the first deployment: it copies
+them from the pre-suite install at `/opt/microseg/HydrideSegmentation/frozen_checkpoints`,
+reading it, never moving it.
+
+If there is nowhere to copy them from, the update **refuses in preflight**,
+before anything has changed, and prints every path it looked in. Put them at
+any one of those paths, or straight into the target:
 
 ```bash
 mkdir -p ~/ml_platform/shared/models/hydride
-cp /path/to/checkpoints/*.pt ~/ml_platform/shared/models/hydride/
+cp -a /path/to/frozen_checkpoints/. ~/ml_platform/shared/models/hydride/
 ```
 
+The directory must contain `model_registry.json` — an empty directory is
+treated as missing, because that is precisely what the service cannot work
+with. To deploy anyway, knowing hydride will not resolve a model, re-run with
+`--allow-missing-seeds`.
+
 Once they are there, every future upgrade and rollback leaves them alone.
-`health_check.sh` warns if that directory is empty.
+
+### Sample micrographs
+
+`shared/data/test_library` is the image library the segmentation UI offers for
+a trial run. Nothing can invent these, so an empty one is only a warning —
+the service falls back to two built-in examples and says so in its journal.
+Drop a set of images in once and every future release picks them up:
+
+```bash
+mkdir -p ~/ml_platform/shared/data/test_library
+cp /path/to/samples/*.tif ~/ml_platform/shared/data/test_library/
+systemctl --user restart ml-platform-hydride.service
+```
+
+---
+
+## Persistent state, and the address the portal advertises
+
+`shared/` holds everything that is yours rather than the release's, and no
+deployment ever overwrites what is already in it. What the update *will* do is
+put something there when it is missing — once — so that a fresh host comes up
+working instead of coming up empty:
+
+| What | Where | If it is missing |
+| --- | --- | --- |
+| Portal environment file | `shared/config/ml-platform.env` | Copied from the pre-suite `~/ml_platform/config/ml-platform.env`, or generated from the manifest |
+| Site configuration | `shared/config/config.intranet.json` | Copied from the release's template if it ships one; otherwise a warning and the portal's own defaults |
+| Hydride checkpoints | `shared/models/hydride` | Adopted from `/opt/microseg/…/frozen_checkpoints`; **refuses to deploy** if there is nowhere to take them from |
+| Sample micrographs | `shared/data/test_library` | A warning only |
+
+### The environment file
+
+The portal renders the links everyone else clicks, and it reads them from
+`shared/config/ml-platform.env`, which systemd loads through `EnvironmentFile=`
+in `ml-platform-portal.service`. Without it the portal falls back to
+`127.0.0.1` — links that work perfectly from the server and from nowhere else.
+
+The file is generated on the first deployment from the address on this host's
+default route:
+
+```
+HYDRIDE_SEGMENTATION_URL=http://10.20.30.40:5005
+PYTEX_URL=http://10.20.30.40:8765
+SCIENTIFIC_CALCULATOR_URL=http://10.20.30.40:5055
+UNIT_CONVERTER_URL=http://10.20.30.40:5065
+```
+
+Edit it freely. **Nothing overwrites a value that is already there** — not an
+upgrade, not a rollback. A later release that adds a service appends the one
+new variable and touches nothing else. Restart the portal after editing:
+
+```bash
+systemctl --user restart ml-platform-portal.service
+```
+
+If this host has more than one interface and the update picks the wrong
+address, name the right one:
+
+```bash
+./update.sh <archive> --intranet-host 10.20.30.40
+```
+
+Or set it permanently in `manifest.yml` under `runtime.intranet_host` and cut a
+release.
+
+### What is checked after a deployment
+
+`health_check.sh` no longer only asks whether the services are up — v1.4.0 was
+entirely up and still broken. It also asserts that:
+
+- every unit that declares an environment file really loads it, and that the
+  file exists;
+- `/api/catalog` advertises the intranet address and **no** loopback address;
+- hydride's journal for its current run shows the model preload finishing, with
+  no warm-load failure;
+- every seeded item is really populated, and the checkpoints resolve through
+  the release's `frozen_checkpoints` link.
+
+Run it any time; it changes nothing:
+
+```bash
+~/ml_platform/current/deploy/health_check.sh
+```
+
+---
+
+## The workbench's own documentation
+
+`http://<server>:8765/docs/` serves PyTex's theory notes, algorithm pages and
+worked examples. On an air-gapped host there is nowhere else to read them, so
+they are **built here, by the deployment**, rather than shipped.
+
+They are not in the release archive on purpose: the built site is around 55 MB
+of generated HTML, and PyTex renders it into its *installed package* -- which
+this suite never creates, because application code is run from source over
+`PYTHONPATH` so that a rollback stays a symlink swap needing no network.
+
+### What the deployment does
+
+The build is the **last** step of `update.sh`, after the health checks have
+passed and the release has been recorded. By then the suite is already serving,
+so nothing waits on it -- which matters, because the site executes thirty-four
+notebooks and takes tens of minutes.
+
+It cannot fail a deployment. A missing Sphinx, an unreachable mirror, a notebook
+that will not run: each is a warning, and `/docs` keeps whatever it had.
+
+The result goes to `shared/docs/pytex`, outside every release, so it survives
+upgrades, rollbacks and pruning. It is stamped with the component commit it was
+built from, so a suite release that does not move PyTex reuses it instead of
+spending the time again.
+
+### What the mirror needs
+
+Only PyTex's `docs` extra: `sphinx`, `furo`, `myst-nb`, `myst-parser`,
+`sphinx-design`, `sphinx-copybutton`, `sphinxcontrib-bibtex`. All are
+pure-Python wheels on PyPI. Every scientific package the notebooks import is
+already a required PyTex dependency and is therefore already installed.
+
+### Doing it separately
+
+To get the suite back quickly and build the documentation later:
+
+```bash
+./deploy/update.sh <archive> --skip-docs
+```
+
+To build against whatever is already deployed -- after installing Sphinx, say,
+or when the build failed during a rollout:
+
+```bash
+./deploy/build_docs.sh                 # every component that declares one
+./deploy/build_docs.sh pytex           # just this one
+./deploy/build_docs.sh --force pytex   # rebuild even if the stamp matches
+```
+
+That script restarts nothing and changes no release. The workbench picks up the
+new directory on the next request.
+
+### If /docs still answers 404
+
+Look in `shared/logs/update-*.log` or `shared/logs/build-docs-*.log` for the
+build. The usual cause is that the office mirror does not carry the `docs`
+extra, in which case the log names the packages to ask IT for.
 
 ---
 
@@ -222,9 +379,10 @@ Once they are there, every future upgrade and rollback leaves them alone.
 ├── current -> releases/1.4.0     the active release (an atomic symlink)
 ├── releases/                     the last few releases, kept for rollback
 ├── shared/                       YOUR DATA. Never touched by deploy scripts
-│   ├── data/                     engagement database
-│   ├── models/                   hydride checkpoints
-│   ├── uploads/  config/         
+│   ├── data/                     engagement database, test_library/
+│   ├── models/hydride/           checkpoints and model_registry.json
+│   ├── uploads/
+│   ├── config/                   ml-platform.env, config.intranet.json
 │   ├── logs/                     deployment and application logs
 │   └── state/history.jsonl       every deployment ever made here
 ├── backups/                      pre-update checkpoints (database, units, freeze)

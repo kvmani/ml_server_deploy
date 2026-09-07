@@ -25,6 +25,14 @@ Type=simple
 # every release. It is also safer -- a versioned WorkingDirectory can be pruned
 # out from under a long-running process.
 WorkingDirectory=@WORKDIR@
+# EnvironmentFile, when the service declares `env_file` in the manifest. It
+# points into shared/, never into a release, so the same file survives every
+# upgrade and every rollback. update.sh seeds it before writing this unit, so
+# the directive is deliberately NOT the tolerant `EnvironmentFile=-` form: a
+# portal that starts without its intranet URLs passes every check on this host
+# and serves dead links to everybody else, and failing to start is the more
+# honest outcome.
+@ENVIRONMENT_FILE@
 @ENVIRONMENT@
 ExecStart=@EXECSTART@
 Restart=on-failure

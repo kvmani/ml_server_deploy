@@ -65,6 +65,33 @@ FAIL_HEALTH = os.environ.get("ML_FIXTURE_FAIL_HEALTH") == SERVICE
 # fails to parse its own routing table.
 ROUTES = @ROUTES@
 
+# The gateway advertises one URL per companion service, and reads each from the
+# environment -- which systemd supplies through EnvironmentFile=. When a
+# variable is missing it falls back to loopback, exactly as the real portal
+# does, and that fallback IS the v1.4.0 failure: every catalog link worked from
+# the server and from nowhere else. The rehearsal can only assert that the
+# environment file reached the process if the fixture reproduces it.
+CATALOG = @CATALOG@
+
+# Startup diagnostics in the shape the real hydride service emits them. Both
+# outcomes are reachable, because a deployment check that has only ever seen
+# the happy line is not a check.
+REQUIRES_MODELS = @REQUIRES_MODELS@
+if REQUIRES_MODELS:
+    if os.path.exists(os.path.join("frozen_checkpoints", "model_registry.json")):
+        sys.stderr.write("Model preload finished (1 model)\\n")
+    else:
+        sys.stderr.write(
+            "Warm load failed for hydride_ml: model reference could not be "
+            "resolved from the registry\\n"
+        )
+    if not os.path.isdir("test_library") or not os.listdir("test_library"):
+        sys.stderr.write(
+            "Image library is unavailable at ./test_library; falling back to "
+            "the 2 configured example image(s)\\n"
+        )
+    sys.stderr.flush()
+
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -75,6 +102,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
         path = self.path.split("?", 1)[0]
         body = ROUTES.get(path)
+
+        if CATALOG and path == "/api/catalog":
+            body = json.dumps({"tools": [
+                {"id": tool["id"], "url": os.environ.get(tool["env"], tool["fallback"])}
+                for tool in CATALOG
+            ]})
 
         if body is None and path.rstrip("/") in ROUTES:
             body = ROUTES[path.rstrip("/")]
@@ -167,8 +200,28 @@ def routes_for(service_id: str, manifest: dict) -> tuple[dict[str, str], list[st
     return routes, health_paths
 
 
+def catalog_for(service_id: str, manifest: dict) -> list[dict]:
+    """The gateway's catalog entries: which variable each URL comes from.
+
+    Empty for every other service, so only the gateway serves a catalog.
+    """
+    if service_id != "gateway":
+        return []
+    entries = []
+    for name, service in manifest["services"].items():
+        variable = service.get("public_url_env")
+        if not variable:
+            continue
+        entries.append({
+            "id": name,
+            "env": variable,
+            "fallback": f"http://127.0.0.1:{service.get('port')}",
+        })
+    return entries
+
+
 def build(out_dir: Path, version: str) -> Path:
-    import json as json_module
+    import json as json_module  # noqa: F401  (used for the seeded model registry)
 
     with (REPO_ROOT / "manifest.yml").open(encoding="utf-8") as handle:
         manifest = yaml.safe_load(handle)
@@ -204,8 +257,12 @@ def build(out_dir: Path, version: str) -> Path:
         runtime["systemd_target"] = runtime["systemd_target"].replace(
             ".target", f"{UNIT_SUFFIX}.target")
     # Stub services stay on loopback; there is no reason to expose a rehearsal
-    # to the network, whatever the real deployment does.
+    # to the network, whatever the real deployment does. The advertised address
+    # matches, which is the honest answer for a deployment that really is
+    # reachable only from this machine -- and it keeps health_check.sh's
+    # catalog assertion correctly skipped rather than failing a correct answer.
     runtime["bind_host"] = "127.0.0.1"
+    runtime["intranet_host"] = "127.0.0.1"
 
     for service in manifest["services"].values():
         # Ordering references other units by name, so they need the suffix too.
@@ -223,6 +280,22 @@ def build(out_dir: Path, version: str) -> Path:
     sources = out_dir / "sources"
     sources.mkdir(parents=True)
 
+    # A stand-in for the trained checkpoints, which are not in git and never
+    # travel in an archive. update.sh refuses to deploy without them, so the
+    # rehearsal has to supply them the same way the office server does: from a
+    # path outside the release that the manifest names as a seed source.
+    seed_models = (out_dir / "seed" / "hydride_models").resolve()
+    (seed_models / "promoted").mkdir(parents=True)
+    (seed_models / "model_registry.json").write_text(
+        json_module.dumps({"models": {"hydride_ml": {"checkpoint": "promoted/fixture.pt"}}}, indent=2),
+        encoding="utf-8", newline="\n",
+    )
+    (seed_models / "promoted" / "fixture.pt").write_bytes(b"fixture checkpoint\n")
+
+    for seed in manifest.get("seeds") or []:
+        if seed.get("id") == "hydride-models":
+            seed["sources"] = [str(seed_models)]
+
     for service_id, service in manifest["services"].items():
         directory = service.get("dir", service_id)
         component = sources / directory
@@ -235,6 +308,8 @@ def build(out_dir: Path, version: str) -> Path:
             .replace("@COMMIT@", f"fixture-{service_id}")
             .replace("@ROUTES@", repr(routes))
             .replace("@HEALTH_PATHS@", repr(health_paths))
+            .replace("@CATALOG@", repr(catalog_for(service_id, manifest)))
+            .replace("@REQUIRES_MODELS@", repr(bool(service.get("requires_models"))))
         )
         (component / "app_stub.py").write_text(stub, encoding="utf-8", newline="\n")
         (component / "README.md").write_text(
@@ -253,6 +328,28 @@ def build(out_dir: Path, version: str) -> Path:
         service["requirements"] = []
         service.pop("tests", None)
         service.pop("npm_build", None)
+
+        # The documentation build is real machinery -- the commit stamp, the
+        # atomic swap, the marker check, the refusal to fail a deployment --
+        # and all of it is exercised here against a command that finishes
+        # instantly. Running Sphinx in a rehearsal would take longer than every
+        # other scenario put together and would be testing Sphinx.
+        #
+        # ML_FIXTURE_DOCS_FAIL makes the build fail on purpose, which is how the
+        # "a broken build cannot fail a deployment" scenario is written.
+        if service.get("docs_build"):
+            service["docs_build"] = {
+                **service["docs_build"],
+                "requirements": [],
+                "timeout_seconds": 60,
+                "command": (
+                    'if [ -n "${ML_FIXTURE_DOCS_FAIL:-}" ]; then exit 3; fi; '
+                    "mkdir -p {target} && "
+                    "printf '<html>fixture docs for %s</html>' \"$(cat src/MARKER)\" "
+                    "> {target}/index.html"
+                ),
+            }
+
 
     # The gateway's declared route checks must match what the stub serves.
     manifest["services"]["gateway"]["gateway_checks"] = [
