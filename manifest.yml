@@ -14,7 +14,7 @@
 # production release.
 
 schema: ml-suite.manifest.v1
-suite_version: 1.5.0
+suite_version: 1.6.0
 
 platform:
   os_id: ubuntu
@@ -274,7 +274,7 @@ services:
 
   gateway:
     repo: kvmani/ml_server
-    ref: v1.1.0
+    ref: v1.2.0
     commit: ""
     dir: ml_server
     import_check: ml_server
@@ -311,6 +311,26 @@ services:
       ML_SERVER_CONFIG: "{root}/shared/config/config.intranet.json"
       APP_FEEDBACK__DATABASE_PATH: "{root}/shared/data/engagement.sqlite3"
       APP_ANALYTICS__ENABLED: "true"
+    # Portal v1.2.0 adds a password-protected operations console at /admin/:
+    # live per-IP activity, per-service timing percentiles, unique-visitor
+    # counts and filterable logs.
+    #
+    # Its credential is deliberately NOT set here. A password in the manifest is
+    # a password in git, in CI and in every release archive, which is the one
+    # place it must never be. The console reads
+    # ML_SERVER_ADMIN_PASSWORD_HASH from the service environment, and with
+    # nothing configured it refuses every login rather than falling open -- so a
+    # deployment that skips this step is safe, it simply has no console.
+    #
+    # To enable it, add one line to shared/config/ml-platform.env on the server
+    # (that file is seeded once and survives every upgrade untouched, so this is
+    # done once and not per release), then restart the portal:
+    #
+    #     ML_SERVER_ADMIN_PASSWORD_HASH=pbkdf2:sha256:600000$...
+    #
+    # See docs/ADMIN_DASHBOARD.md in the ml_server component for how to generate
+    # the hash. The portal rejects placeholder values such as "changeme" and
+    # "password", so a half-finished configuration fails closed.
     shared_links:
       data: shared/data
       logs: shared/logs
@@ -325,7 +345,7 @@ services:
 
   pytex:
     repo: kvmani/pytex
-    ref: v0.8.1
+    ref: v0.9.0
     commit: ""
     dir: pytex
     import_check: pytex
@@ -394,14 +414,33 @@ services:
     # `[project] dependencies` like anything else, so they reach resolved.txt
     # and the office venv, and `dev` is all the test run needs on top.
     #
-    # v0.8.1 adds phase identification: the workbench can be given several
+    # v0.8.1 added phase identification: the workbench can be given several
     # candidate structures -- catalogue entries or .cif files -- and asked which
     # of them a measured powder scan is, rather than being told the phase and
-    # asked to measure something about it. New pure-Python surface on the
-    # dependencies already deployed; nothing new to mirror.
+    # asked to measure something about it.
+    #
+    # v0.9.0 adds two things users on this server will notice.
+    #
+    # A progress bar across the whole workbench. Any call in flight now shows
+    # what is being waited for, how long it has taken, and how much longer it is
+    # likely to take. It matters here more than anywhere: on the office server
+    # the machine is shared and a thirty-second refinement with no feedback is
+    # indistinguishable from a hung service, which is what generates the support
+    # call. Where an operation can count its own work the percentage is measured;
+    # where it cannot the bar shows elapsed time and, after a couple of runs, an
+    # estimate learned from them and labelled as one.
+    #
+    # And the HRTEM workspace, which was shipped in 0.8.x but could not actually
+    # run in a browser -- every button on it threw against a shell API that does
+    # not exist. It works now, and reaches the full residual aberration set of a
+    # corrected instrument. Anyone who tried that panel on this server and found
+    # it dead should be told it is fixed.
+    #
+    # Both are pure-Python surface on the dependencies already deployed; nothing
+    # new to mirror.
     #
     # Its documentation is built on this server after the deployment; see
-    # `docs_build` below and the RUNBOOK. v0.8.1 is the first release whose
+    # `docs_build` below and the RUNBOOK. v0.8.1 was the first release whose
     # bundle builder takes an --output, which is what lets that build write into
     # shared/ instead of into the release tree.
     test_extras: [dev]
@@ -583,7 +622,7 @@ mirror_notes:
   - "The gateway's requirements.txt resolves pdf_tools and tabular_ml from
      GitHub archive URLs; build_suite.py rewrites those to local paths, because
      an air-gapped host cannot fetch them."
-  - "PyTex (pinned at v0.8.1) requires pymatgen, orix, diffsims, kikuchipy, matplotlib and
+  - "PyTex (pinned at v0.9.0) requires pymatgen, orix, diffsims, kikuchipy, matplotlib and
      h5py, so they are now part of the deployed environment rather than an
      extra that was left out of it. That closes the gap where CIF loading and
      CBED symmetry raised ModuleNotFoundError on the office server while

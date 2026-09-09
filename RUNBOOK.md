@@ -290,6 +290,48 @@ address, name the right one:
 Or set it permanently in `manifest.yml` under `runtime.intranet_host` and cut a
 release.
 
+### The administrator console (new in suite 1.6.0)
+
+The portal gained a password-protected operations console at `/admin/`, reached
+from the "Administrator sign in" link in the footer of every page. It shows who
+is using what right now, how long each operation takes, how many different
+machines used the platform this month, and a filterable view of the log — the
+questions support actually asks during an incident.
+
+**It is off until you give it a password, and off is safe.** No credential is in
+the release archive, in the manifest or in git, which is where a password must
+never be. With nothing configured the console refuses every login rather than
+falling open, so a deployment that skips this section is not exposed; it simply
+has no console.
+
+To turn it on, generate a hash on the server. The portal ships a command for it,
+which prompts twice without echoing, so the password never reaches your shell
+history or `ps`:
+
+```bash
+cd ~/ml_platform/current/apps/ml_server
+PYTHONPATH=src ~/ml_platform/.venv/bin/python -m ml_server.cli --hash-admin-password
+```
+
+(The portal's own code runs from source over `PYTHONPATH` rather than being
+installed into the virtual environment -- that is what makes a rollback a
+symlink swap -- so the module is invoked directly rather than through a
+console script.)
+
+It prints one `ML_SERVER_ADMIN_PASSWORD_HASH=...` line. Append that line to
+`shared/config/ml-platform.env`, then restart the portal:
+
+```bash
+systemctl --user restart ml-platform-portal.service
+```
+
+That file is seeded once and **nothing overwrites a value already in it**, so
+this is done once and not again at every release. The portal rejects placeholder
+values such as `changeme`, `admin` and `password`, so a half-finished
+configuration fails closed rather than leaving the console open.
+
+Full detail is in `docs/ADMIN_DASHBOARD.md` inside the deployed portal source.
+
 ### What is checked after a deployment
 
 `health_check.sh` no longer only asks whether the services are up — v1.4.0 was
