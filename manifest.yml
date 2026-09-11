@@ -506,7 +506,7 @@ services:
     # the address the user typed, so it works from every desk without knowing
     # this host's intranet address.
     repo: kvmani/OnlineAnnotator
-    ref: v1.0.0
+    ref: v1.0.1
     commit: ""
     dir: OnlineAnnotator
     import_check: online_annotator
