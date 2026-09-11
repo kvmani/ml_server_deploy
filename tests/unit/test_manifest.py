@@ -188,7 +188,7 @@ def test_the_gateway_loads_the_seeded_environment_file(authored: dict) -> None:
 
 
 def test_every_routed_service_supplies_a_url_variable(authored: dict) -> None:
-    # These four are what the portal reads to build the catalog. A service with
+    # These are what the portal reads to build the catalog. A service with
     # a unit and no variable is one the portal will link to on loopback.
     variables = {
         name: service.get("public_url_env")
@@ -200,6 +200,7 @@ def test_every_routed_service_supplies_a_url_variable(authored: dict) -> None:
         "calculator": "SCIENTIFIC_CALCULATOR_URL",
         "converter": "UNIT_CONVERTER_URL",
         "hydride": "HYDRIDE_SEGMENTATION_URL",
+        "annotator": "ONLINE_ANNOTATOR_URL",
     }
 
 
@@ -372,3 +373,13 @@ def test_rejects_a_bad_documentation_build(authored: dict, mutation, expected: s
     mutation(document)
     problems = manifest_tool.validate(document)
     assert any(expected in problem for problem in problems), f"expected {expected!r} in {problems}"
+
+
+def test_the_annotator_keeps_its_data_in_shared_state(authored: dict) -> None:
+    # Online Annotator persists images, label maps and exports by design; a data
+    # directory inside a release would be lost on the next upgrade or rollback.
+    annotator = authored["services"]["annotator"]
+    assert annotator["environment"]["ONLINE_ANNOTATOR_DATA_DIR"].startswith("{root}/shared/")
+    assert annotator["health"] == "/api/health"
+    gateway = authored["services"]["gateway"]
+    assert annotator["unit"] in gateway["after"] and annotator["unit"] in gateway["wants"]

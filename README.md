@@ -34,6 +34,7 @@ archive and assumes no internet and no help.
 | pytex | `kvmani/pytex` | 8765 | `/api/health` | |
 | calculator | `kvmani/scientific_calculator` | 5055 | `/api/health` | |
 | converter | `kvmani/unit_converter` | 5065 | `/api/health` | |
+| annotator | `kvmani/OnlineAnnotator` | 5070 | `/api/health` | keeps data by design in `shared/data/online_annotator` |
 | pdf_tools | `kvmani/pdf_tools` | — | `/pdf_tools/health` | in-process in the gateway |
 | tabular_ml | `kvmani/tabular_ml` | — | `/tabular_ml/api/v1/health` | in-process; Vite frontend built in CI |
 | hydride | `Pushpalathadevi/HydrideSegmentation` | 5005 | `/health` | different owner; needs model checkpoints supplied out of band |

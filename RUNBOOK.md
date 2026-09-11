@@ -270,6 +270,7 @@ HYDRIDE_SEGMENTATION_URL=http://10.20.30.40:5005
 PYTEX_URL=http://10.20.30.40:8765
 SCIENTIFIC_CALCULATOR_URL=http://10.20.30.40:5055
 UNIT_CONVERTER_URL=http://10.20.30.40:5065
+ONLINE_ANNOTATOR_URL=http://10.20.30.40:5070
 ```
 
 Edit it freely. **Nothing overwrites a value that is already there** — not an
@@ -289,6 +290,41 @@ address, name the right one:
 
 Or set it permanently in `manifest.yml` under `runtime.intranet_host` and cut a
 release.
+
+### Online Annotator (new in suite 1.7.0)
+
+Suite 1.7.0 adds Online Annotator on port 5070 (`ml-platform-annotator.service`),
+where colleagues create, review and export segmentation ground truth. The
+portal's catalog card links to it through `ONLINE_ANNOTATOR_URL`, which the
+update appends to `shared/config/ml-platform.env` if it is missing.
+
+**It keeps data, unlike the other services.** Images, label maps, versions,
+exports and the audit trail live in `shared/data/online_annotator`, which no
+upgrade or rollback touches. Include that directory in your backups; its
+database is consistent to copy with
+`sqlite3 shared/data/online_annotator/online_annotator.sqlite3 ".backup /path/backup.sqlite3"`.
+
+**First sign-in.** The first start creates an administrator with a one-time
+password and writes it to `shared/data/online_annotator/initial_admin_password.txt`
+(it is also in the journal). Open `http://<server>:5070/`, sign in with it,
+choose your own password when asked, then delete the file. To choose the
+administrator's address in advance instead, add these to the env file before the
+first start (and remove the password line afterwards):
+
+```
+ONLINE_ANNOTATOR_ADMIN_EMAIL=lead.scientist@lab.example
+ONLINE_ANNOTATOR_ADMIN_PASSWORD=a-long-first-password-9
+```
+
+Lost the administrator password later:
+
+```bash
+cd ~/ml_platform/current/apps/OnlineAnnotator
+ONLINE_ANNOTATOR_DATA_DIR=~/ml_platform/shared/data/online_annotator \
+  PYTHONPATH=src ~/ml_platform/.venv/bin/python -m online_annotator reset-password lead.scientist@lab.example
+```
+
+Its "All tools" link needs no configuration: it is host-relative (`:5000/`).
 
 ### The administrator console (new in suite 1.6.0)
 
