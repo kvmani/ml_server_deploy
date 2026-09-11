@@ -178,6 +178,7 @@ SOURCE_DIRS=(
     "pdf_tools=pdf_tools"
     "tabular_ml=tabular_ml"
     "hydride=HydrideSegmentation"
+    "annotator=OnlineAnnotator"
 )
 
 build_archive() {
@@ -277,7 +278,7 @@ scenario_fresh_install() {
     assert "deployment history was written" test -s "${root}/shared/state/history.jsonl"
 
     local unit
-    for unit in portal pytex calculator converter hydride; do
+    for unit in portal pytex calculator converter hydride annotator; do
         assert "$(runit "$unit") is active" systemctl --user is-active --quiet "$(runit "$unit")"
     done
 
@@ -312,7 +313,7 @@ scenario_single_component() {
 
     local -A pid_before
     local unit
-    for unit in portal pytex calculator converter hydride; do
+    for unit in portal pytex calculator converter hydride annotator; do
         pid_before[$unit]="$(unit_pid "$(runit "$unit")")"
     done
 
@@ -348,7 +349,7 @@ MUTATOR
     fi
     assert_eq "pytex was restarted" "1" "$restarted"
 
-    for unit in calculator converter hydride; do
+    for unit in calculator converter hydride annotator; do
         if [[ "$(unit_pid "$(runit "$unit")")" == "${pid_before[$unit]}" ]]; then
             untouched=$(( untouched + 1 ))
         else
@@ -356,7 +357,7 @@ MUTATOR
             ASSERT_FAILURES=$(( ASSERT_FAILURES + 1 ))
         fi
     done
-    assert_eq "the three unchanged services kept running untouched" "3" "$untouched"
+    assert_eq "the four unchanged services kept running untouched" "4" "$untouched"
     assert "health still passes" "${REPO_ROOT}/deploy/health_check.sh" --root "$root" --systemd-scope user
 }
 
