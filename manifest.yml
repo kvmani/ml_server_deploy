@@ -14,7 +14,7 @@
 # production release.
 
 schema: ml-suite.manifest.v1
-suite_version: 1.8.0
+suite_version: 1.9.0
 
 platform:
   os_id: ubuntu
@@ -142,6 +142,13 @@ seeds:
       settings and secrets that cannot be generated, so a missing one is a loud
       warning rather than a refusal: the release template is copied when it
       ships one, and otherwise the portal falls back to its built-in defaults.
+
+      Seeding only ever creates it. An EXISTING file is never overwritten --
+      it is validated and migrated instead, in update.sh phases A9e and B4c,
+      using the config schema from the release being installed. Legacy key
+      spellings are renamed, new settings are added with defaults, every local
+      value is preserved, the original is backed up beside it, and a migration
+      that would be a guess refuses the deployment before anything changes.
 
   - id: hydride-models
     kind: tree
@@ -274,7 +281,11 @@ services:
 
   gateway:
     repo: kvmani/ml_server
-    ref: v1.3.0
+    # 1.3.1 fixes the admin sign-in failure seen from suite v1.4.0 to v1.6.0
+    # (a Secure session cookie on a plain-HTTP site, and a signing key that
+    # differed between the two gunicorn workers) and adds the versioned config
+    # schema that update.sh validates and migrates shared/config against.
+    ref: v1.3.1
     commit: ""
     dir: ml_server
     import_check: ml_server
@@ -506,13 +517,17 @@ services:
     # the address the user typed, so it works from every desk without knowing
     # this host's intranet address.
     #
-    # Suite 1.8.0 takes annotator 1.1.0, which migrates its database to schema 2
-    # on first start (in place, additive, annotations untouched). Annotator 1.0.x
-    # refuses to start on a schema-2 database by design, so a rollback past this
-    # suite release needs the annotator data directory restored from backup --
-    # see "Rollback" in RUNBOOK.md. Every other component rolls back normally.
+    # Annotator 1.1.0 (suite 1.8.0) added mask import and migrated the database
+    # to schema 2 on first start: in place, additive, annotations untouched.
+    # Annotator 1.0.x refuses to start on a schema-2 database by design, so a
+    # rollback to suite 1.7.0 or earlier needs the annotator data directory
+    # restored from backup -- see "Rollback" in RUNBOOK.md. Every other
+    # component, and a rollback to 1.8.0, behaves normally.
+    #
+    # 1.1.1 is 1.1.0 with two flaky browser tests fixed; no product code differs.
+    # It is taken here because its tag is the one with a green CI run.
     repo: kvmani/OnlineAnnotator
-    ref: v1.1.0
+    ref: v1.1.1
     commit: ""
     dir: OnlineAnnotator
     import_check: online_annotator

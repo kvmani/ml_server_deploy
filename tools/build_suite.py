@@ -195,6 +195,36 @@ def assert_no_github_dependencies(staging: Path) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+def wants_execute_bit(path: Path) -> bool:
+    """Whether ``path`` must be mode 0755 in the archive.
+
+    NTFS has no execute bit, and Windows reports every regular file as 0o666
+    regardless of what ``chmod(0o755)`` was asked to do -- so a release built on
+    the Windows workstation used to ship ``deploy/update.sh`` as 0644, and the
+    office server answered ``Permission denied`` to the one command the whole
+    runbook is built around.
+
+    The question is therefore answered from the file's content and name rather
+    than from the build host's filesystem: a shebang means a program, and so
+    does a ``.sh`` suffix. The host's own execute bit is still honoured, which is
+    what keeps a Linux build byte-identical to the same tree built on Windows.
+    """
+    try:
+        if os.stat(path).st_mode & stat.S_IXUSR and os.name != "nt":
+            return True
+    except OSError:
+        return False
+    if not path.is_file():
+        return False
+    if path.suffix == ".sh":
+        return True
+    try:
+        with path.open("rb") as handle:
+            return handle.read(2) == b"#!"
+    except OSError:
+        return False
+
+
 def build_archive(staging: Path, prefix: str, out_path: Path, mtime: int) -> str:
     """Write a reproducible .tar.gz and return its sha256.
 
@@ -206,6 +236,8 @@ def build_archive(staging: Path, prefix: str, out_path: Path, mtime: int) -> str
     for path in sorted(staging.rglob("*"), key=lambda item: item.relative_to(staging).as_posix()):
         entries.append((f"{prefix}/{path.relative_to(staging).as_posix()}", path))
 
+    executables = {name for name, path in entries if wants_execute_bit(path)}
+
     def normalise(info: tarfile.TarInfo) -> tarfile.TarInfo:
         info.uid = info.gid = 0
         info.uname = info.gname = ""
@@ -214,7 +246,7 @@ def build_archive(staging: Path, prefix: str, out_path: Path, mtime: int) -> str
         # different umask on the build machine cannot change the checksum.
         if info.isdir():
             info.mode = 0o755
-        elif info.mode & stat.S_IXUSR:
+        elif info.name in executables:
             info.mode = 0o755
         else:
             info.mode = 0o644
@@ -236,7 +268,14 @@ def build_archive(staging: Path, prefix: str, out_path: Path, mtime: int) -> str
                 archive.addfile(info)
 
     with raw.open("rb") as source, out_path.open("wb") as destination:
-        with gzip.GzipFile(fileobj=destination, mode="wb", mtime=0, compresslevel=9) as gz:
+        # filename="" matters as much as mtime=0. GzipFile otherwise takes the
+        # name from fileobj.name and writes it into the gzip header, so the same
+        # tree built to two different output paths produced two different
+        # checksums -- and the checksum is the whole mechanism by which the
+        # office server proves the archive is the one that passed the tests.
+        with gzip.GzipFile(
+            filename="", fileobj=destination, mode="wb", mtime=0, compresslevel=9
+        ) as gz:
             shutil.copyfileobj(source, gz)
     raw.unlink()
 

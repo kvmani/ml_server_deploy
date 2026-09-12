@@ -75,6 +75,18 @@ the engagement database, uploads, model checkpoints, configuration — lives
 outside every release directory. Going back to an older release cannot revert or
 delete any of it.
 
+**The migrated portal config rolls back fine, and is deliberately not reverted.**
+An upgrade may add settings to `shared/config/config.intranet.json`; an older
+release simply ignores keys it does not know, and every value it *does* read is
+still there with the same meaning. Reverting the file would be the riskier
+choice, because it would also revert anything you had changed since. If you do
+need the exact pre-upgrade file, both copies are kept:
+
+```bash
+ls ~/ml_platform/shared/config/config.intranet.json.bak-*
+ls ~/ml_platform/backups/*/config/config.intranet.json
+```
+
 **One exception, from suite 1.8.0: the Online Annotator database.** Annotator
 1.1.0 upgrades its database to schema 2 the first time it starts, in place and
 additively. That is safe going forward and your annotations are never at risk,
@@ -96,6 +108,39 @@ sudo systemctl start ml-platform-annotator.service
 
 Keep the `.schema2` copy: it holds every annotation made since the upgrade, and
 going forward to 1.8.0 again makes it usable.
+
+### What happens when a deployment fails
+
+`update.sh` is in two halves, and where it stops decides what it does.
+
+**Phase A — preflight. Nothing has changed.** The archive, the platform, the
+ports, the prerequisites, the seeded state and **the shared portal
+configuration** are all checked before a single file is written. A failure here
+prints what is wrong and exits; the running suite is untouched and there is
+nothing to undo.
+
+**Phase B — up to the symlink swap. Still nothing to undo.** The release is
+unpacked into `releases/<version>/`, shared state is seeded, the config is
+migrated, and dependencies are installed. A failure in any of these leaves
+`current` pointing where it always did. The half-unpacked release directory is
+left behind on purpose, for diagnosis.
+
+**Phase B — after the symlink swap. Rollback is automatic.** From the moment
+`current` moves, any of these rolls the deployment back to the previous release
+without being asked:
+
+| Step | Failure |
+| --- | --- |
+| B8 restart | a unit fails to restart, or does not stay up |
+| B9 health | any health check fails — including the admin session and CSRF smoke test |
+
+The rollback is the same symlink swap `rollback.sh` performs, and it is reported
+as it happens. The failed release stays in `releases/` so you can look at it.
+`current` is never left pointing at a release that did not pass.
+
+If the automatic rollback itself fails — which means systemd is in a state the
+script cannot fix — it says so loudly and prints the exact command to restore
+the symlink by hand.
 
 ### Look at the logs
 
@@ -348,23 +393,109 @@ ONLINE_ANNOTATOR_DATA_DIR=~/ml_platform/shared/data/online_annotator \
 
 Its "All tools" link needs no configuration: it is host-relative (`:5000/`).
 
+### The portal's configuration file
+
+Everything site-specific about the portal lives in one file:
+
+```
+~/ml_platform/shared/config/config.intranet.json
+```
+
+It is **outside every release directory**, so it survives upgrades, rollbacks
+and release pruning. The copies inside `~/ml_platform/releases/<version>/` are
+templates the installer may seed *from*; they are never what a running portal
+reads. If you are editing a file under `releases/`, you are editing the wrong
+file.
+
+The settings that matter most:
+
+| Key | What it does |
+| --- | --- |
+| `config_version` | Schema version. The updater migrates this for you; do not edit it. |
+| `secret_key` | Signs admin session cookies. Must be stable — see below. |
+| `security.admin_token` | The administrator console password. |
+| `security.admin_password_hash` | A PBKDF2 hash, preferred to the token above. |
+| `security.ssl_enabled` | `false` for the plain-HTTP intranet, `true` for HTTPS. |
+| `security.csrf_enabled` | Leave `true`. The updater refuses a config that sets it `false`. |
+| `security.trusted_proxy_count` | `0` unless a reverse proxy sits in front of the portal. |
+
+`security.admin_token` is the one canonical spelling. `adminToken`,
+`admin-token` and a top-level `admin_token` are all understood and are rewritten
+to the canonical key by the updater, so an older file keeps working — but a file
+that sets **two** spellings to two different values is refused rather than
+guessed at.
+
+To see what the live configuration says, without printing any secret:
+
+```bash
+~/ml_platform/current/deploy/status.sh
+```
+
+#### How the updater treats it
+
+`update.sh` never blindly overwrites this file. On every run it:
+
+1. reads the live file **in preflight**, against the schema of the release in
+   the archive — so an unusable config stops the deployment while the current
+   release is still serving, and nothing has changed;
+2. migrates it in Phase B, *before* the `current` symlink moves: legacy key
+   spellings are renamed, settings a new release needs are added with their
+   defaults, and every value you set by hand is kept exactly as it was;
+3. writes `config.intranet.json.bak-<stamp>` beside it first, and also keeps a
+   copy in `~/ml_platform/backups/<stamp>/config/`;
+4. leaves the file completely untouched when nothing needed changing.
+
+A migration that would be a guess — two spellings of one setting, a config
+written by a newer release, a value of the wrong type — refuses the deployment
+and says which key is the problem.
+
+#### A stable `secret_key`
+
+The portal signs the administrator's session cookie with `secret_key`, and it
+runs as `gunicorn --workers 2`. If the key differed between workers or changed
+on restart, the worker handling the login POST could not read the session the
+worker that rendered the form had written, and the login would fail with an
+expired-form message. So:
+
+- if `secret_key` is set in the config file, that value is used;
+- if it is empty or still a `__SET_...__` placeholder, the portal generates one
+  **once** and keeps it in `shared/config/.session_secret_key`, which every
+  worker reads and which survives restarts and upgrades. That file is a secret:
+  do not copy it anywhere, and do not put it in git.
+
+The updater fills in a strong `secret_key` for you when the file has none, so on
+a migrated deployment there is nothing to do.
+
 ### The administrator console (new in suite 1.6.0)
 
-The portal gained a password-protected operations console at `/admin/`, reached
-from the "Administrator sign in" link in the footer of every page. It shows who
-is using what right now, how long each operation takes, how many different
-machines used the platform this month, and a filterable view of the log — the
-questions support actually asks during an incident.
+The canonical URL is:
 
-**It is off until you give it a password, and off is safe.** No credential is in
-the release archive, in the manifest or in git, which is where a password must
+```
+http://<server>:5000/admin/
+```
+
+It is also reached from the **"Administrator sign in"** link in the footer of
+every portal page. The URL being visible is fine — authentication is enforced on
+every page and every JSON endpoint behind it.
+
+The console shows who is using what right now, how long each operation takes,
+how many different machines used the platform this month, and a filterable view
+of the log — the questions support actually asks during an incident.
+
+**It is off until you give it a credential, and off is safe.** No credential is
+in the release archive, in the manifest or in git, which is where a password must
 never be. With nothing configured the console refuses every login rather than
 falling open, so a deployment that skips this section is not exposed; it simply
-has no console.
+has no console. `status.sh` reports `admin auth NOT CONFIGURED` when that is the
+case.
 
-To turn it on, generate a hash on the server. The portal ships a command for it,
-which prompts twice without echoing, so the password never reaches your shell
-history or `ps`:
+#### Setting or changing the password
+
+Two ways, in order of preference.
+
+**A hash in the environment file** (nothing reversible is stored). Generate it on
+the server; the command prompts twice without echoing, so the password never
+reaches your shell history or `ps`:
 
 ```bash
 cd ~/ml_platform/current/apps/ml_server
@@ -372,23 +503,103 @@ PYTHONPATH=src ~/ml_platform/.venv/bin/python -m ml_server.cli --hash-admin-pass
 ```
 
 (The portal's own code runs from source over `PYTHONPATH` rather than being
-installed into the virtual environment -- that is what makes a rollback a
-symlink swap -- so the module is invoked directly rather than through a
-console script.)
+installed into the virtual environment — that is what makes a rollback a symlink
+swap — so the module is invoked directly rather than through a console script.)
 
 It prints one `ML_SERVER_ADMIN_PASSWORD_HASH=...` line. Append that line to
-`shared/config/ml-platform.env`, then restart the portal:
+`shared/config/ml-platform.env` and restart the portal.
+
+**Or a token in the config file**, which is simpler and is what most office
+deployments use. Edit one line:
 
 ```bash
+nano ~/ml_platform/shared/config/config.intranet.json
+#   "security": { "admin_token": "the-new-password", ... }
 systemctl --user restart ml-platform-portal.service
 ```
 
-That file is seeded once and **nothing overwrites a value already in it**, so
-this is done once and not again at every release. The portal rejects placeholder
-values such as `changeme`, `admin` and `password`, so a half-finished
-configuration fails closed rather than leaving the console open.
+Either way:
+
+- **a restart is required** — the credential is read once at startup;
+- **no reinstall is required**, and no redeployment of the suite;
+- both files are persistent state that no upgrade overwrites, so this is done
+  once and not at every release;
+- the portal rejects placeholder values such as `changeme`, `admin`, `password`
+  and `__SET_ADMIN_TOKEN__`, so a half-finished configuration fails closed.
+
+Confirm it took effect, without printing the secret:
+
+```bash
+~/ml_platform/current/deploy/status.sh | grep -A1 'admin auth'
+```
 
 Full detail is in `docs/ADMIN_DASHBOARD.md` inside the deployed portal source.
+
+### HTTP or HTTPS
+
+The office portal is served over plain HTTP on the intranet, and
+`security.ssl_enabled` must say so. That one setting drives three things at once:
+
+| `ssl_enabled` | Session cookie | HTTPS redirect | HSTS |
+| --- | --- | --- | --- |
+| `false` (office default) | not `Secure` | no | no |
+| `true` | `Secure` | yes | yes |
+
+They have to move together. A `Secure` cookie is **never sent back by a browser
+over HTTP**, so an HTTP site whose session cookie is marked `Secure` can serve
+every page perfectly and still make signing in impossible. That is exactly what
+happened between suite v1.4.0 and v1.6.0, and both `health_check.sh` and
+`status.sh` now assert the two agree.
+
+CSRF protection is on in both modes and is not a thing to switch off; a config
+that sets `security.csrf_enabled` to `false` is refused by the updater.
+
+### "Page expired" when signing in to /admin/
+
+The login form says it expired, and no password gets you in. The message means
+the CSRF token that came back could not be matched to the session that issued
+it. Work through these in order.
+
+**1. Ask the portal why.** It logs the reason — the shape of the failure only,
+never a token, a session or a password:
+
+```bash
+journalctl --user -u ml-platform-portal.service --since '10 min ago' | grep -i csrf
+```
+
+**2. Check the cookie policy against the scheme.**
+
+```bash
+~/ml_platform/current/deploy/status.sh | grep -E 'mode|session cookie'
+```
+
+`mode http` with `Secure=False` is correct for the office. `mode http` with
+`Secure=True` is the failure: set `security.ssl_enabled` to `false` in the shared
+config and restart the portal.
+
+**3. Check the signing key is stable.** `status.sh` prints `signing key`. Either
+answer is fine; what is not fine is the key changing per process, which cannot
+happen any more but is worth confirming if you have edited things by hand:
+
+```bash
+ls -l ~/ml_platform/shared/config/.session_secret_key
+```
+
+**4. Run the smoke check**, which reproduces the whole browser lifecycle:
+
+```bash
+~/ml_platform/current/deploy/health_check.sh
+```
+
+Look for the `gateway login GET->POST` line. `session and CSRF token accepted`
+is a pass. Anything else names the step that broke.
+
+**5. If the page simply will not load at all**, clear the portal's cookies for
+this site in the browser and try once more — a `Secure` session cookie left over
+from a misconfigured release can linger.
+
+Never "fix" this by disabling CSRF. It protects the console that shows client
+addresses and logs, and every failure above has a real cause that the log names.
 
 ### What is checked after a deployment
 
@@ -401,7 +612,13 @@ entirely up and still broken. It also asserts that:
 - hydride's journal for its current run shows the model preload finishing, with
   no warm-load failure;
 - every seeded item is really populated, and the checkpoints resolve through
-  the release's `frozen_checkpoints` link.
+  the release's `frozen_checkpoints` link;
+- the administrator console renders, issues a session cookie, and that cookie's
+  `Secure` flag agrees with `security.ssl_enabled`;
+- the login's full GET -> POST lifecycle works: the check posts a deliberately
+  wrong password and requires the answer to be "incorrect password" rather than
+  "expired form", which proves the session and CSRF token round-tripped without
+  this script ever needing the real credential.
 
 Run it any time; it changes nothing:
 
@@ -483,6 +700,8 @@ extra, in which case the log names the packages to ask IT for.
 │   ├── models/hydride/           checkpoints and model_registry.json
 │   ├── uploads/
 │   ├── config/                   ml-platform.env, config.intranet.json
+│   │                             + .session_secret_key (generated, secret)
+│   │                             + config.intranet.json.bak-* (pre-migration)
 │   ├── logs/                     deployment and application logs
 │   └── state/history.jsonl       every deployment ever made here
 ├── backups/                      pre-update checkpoints (database, units, freeze)

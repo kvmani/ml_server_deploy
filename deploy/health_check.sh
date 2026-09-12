@@ -433,6 +433,135 @@ PYEOF
 }
 
 # ---------------------------------------------------------------------------
+# 10. The admin console: session, CSRF and authentication over the real wire.
+#
+# This exists because "/health is 200" was the whole of the health check when
+# the portal shipped a login nobody could get through. A 200 from /health says
+# the process is alive; it says nothing about whether a browser can hold a
+# session, which is a separate mechanism with its own failure mode -- and the
+# one that actually broke in v1.4.0 through v1.6.0.
+#
+# What is asserted, in the order a browser does it:
+#
+#   1. GET /               the portal renders
+#   2. GET /admin/login    the console is reachable and not 5xx
+#   3. Set-Cookie          a session cookie is issued at all
+#   4. the Secure flag     matches ssl_enabled -- a Secure cookie on an HTTP
+#                          site is never returned by a browser, which is
+#                          precisely the "Page expired" failure
+#   5. a CSRF token        is rendered into the form
+#   6. GET -> POST         the token and cookie are accepted together: the POST
+#                          must be refused for the PASSWORD, not for the token
+#
+# Step 6 deliberately posts a password that is certain to be wrong. That
+# exercises the entire session and CSRF lifecycle without this script ever
+# holding, reading or needing the real admin credential. "Incorrect password"
+# is a PASS here: it proves the token round-tripped. An expired-form answer is
+# the failure being tested for.
+# ---------------------------------------------------------------------------
+
+check_admin_session() {
+    local port url jar page code token set_cookie body ssl_enabled summary
+    port="$(svc gateway port)"
+    [[ -n "$port" ]] || return 0
+    url="http://${HOST}:${port}"
+
+    # The cookie jar is what makes this a browser-shaped test rather than two
+    # unrelated requests.
+    jar="$(mktemp)"
+    page="$(mktemp)"
+    # shellcheck disable=SC2064
+    trap "rm -f '${jar}' '${page}'" RETURN
+
+    code="$(http_status "${url}/" 15)"
+    if [[ "$code" =~ ^[23] ]]; then
+        record "gateway" portal "/" ok "HTTP ${code}"
+    else
+        record "gateway" portal "/" fail "HTTP ${code}"
+        return 0
+    fi
+
+    set_cookie="$(curl -s -D - -o "$page" -c "$jar" --max-time 15 "${url}/admin/login" 2>/dev/null || true)"
+    code="$(printf '%s' "$set_cookie" | awk '/^HTTP/{c=$2} END{print c}')"
+    if [[ ! "$code" =~ ^2 ]]; then
+        record "gateway" admin "/admin/login" fail "HTTP ${code:-000}; the console did not render"
+        return 0
+    fi
+    record "gateway" admin "/admin/login" ok "HTTP ${code}"
+
+    if ! grep -qi 'set-cookie:.*session=' <<<"$set_cookie"; then
+        record "gateway" session "/admin/login" fail \
+            "no session cookie was issued, so a login can never hold a CSRF token"
+        return 0
+    fi
+    record "gateway" session "set-cookie" ok "session cookie issued"
+
+    # Does the cookie's Secure flag agree with how the site is actually served?
+    summary="$(config_summary_json "$RELEASE" 2>/dev/null || true)"
+    ssl_enabled=""
+    [[ -n "$summary" ]] && ssl_enabled="$(config_summary_field "$summary" ssl_enabled)"
+    if grep -i 'set-cookie:.*session=' <<<"$set_cookie" | grep -qi 'secure'; then
+        if [[ "$ssl_enabled" == "True" ]]; then
+            record "gateway" cookie "Secure" ok "Secure, matching ssl_enabled=true"
+        else
+            record "gateway" cookie "Secure" fail \
+                "the session cookie is Secure but this site is served over HTTP; no browser will return it (set security.ssl_enabled correctly)"
+        fi
+    else
+        if [[ "$ssl_enabled" == "True" ]]; then
+            record "gateway" cookie "Secure" fail \
+                "ssl_enabled=true but the session cookie is not Secure"
+        else
+            record "gateway" cookie "Secure" ok "not Secure, matching plain-HTTP intranet mode"
+        fi
+    fi
+
+    # A forced HTTPS redirect on an HTTP deployment makes every page unreachable.
+    if [[ "$ssl_enabled" != "True" ]] && printf '%s' "$set_cookie" | grep -qi '^strict-transport-security:'; then
+        record "gateway" hsts "/admin/login" fail \
+            "HSTS is sent on a plain-HTTP deployment; browsers will refuse the site afterwards"
+    else
+        record "gateway" hsts "/admin/login" ok "consistent with ssl_enabled=${ssl_enabled:-false}"
+    fi
+
+    token="$(sed -n 's/.*name="csrf_token"[^>]*value="\([^"]*\)".*/\1/p' "$page" | head -1)"
+    if [[ -z "$token" ]]; then
+        # A console with no credential configured renders an explanation rather
+        # than a usable form. That is a warning, not a broken deployment.
+        if grep -qi 'not configured' "$page"; then
+            record "gateway" csrf "/admin/login" warn \
+                "no admin credential is configured, so no login form is offered"
+        else
+            record "gateway" csrf "/admin/login" fail "the login page rendered no CSRF token"
+        fi
+        return 0
+    fi
+    record "gateway" csrf "token" ok "rendered into the form"
+
+    # The GET -> POST lifecycle, with the cookie jar carrying the session back.
+    body="$(curl -s -b "$jar" -c "$jar" --max-time 15 \
+        --data-urlencode "csrf_token=${token}" \
+        --data-urlencode "password=deliberately-wrong-$(date +%s)" \
+        "${url}/admin/login" 2>/dev/null || true)"
+
+    if grep -qi 'expired' <<<"$body"; then
+        record "gateway" login "GET->POST" fail \
+            "the session did not survive the round trip: the form was reported expired (see the portal log for the reason)"
+    elif grep -qi 'incorrect password' <<<"$body"; then
+        # Exactly right: the token and session were accepted, only the password
+        # was refused -- which is the whole of what this check can assert
+        # without knowing the real one.
+        record "gateway" login "GET->POST" ok "session and CSRF token accepted; wrong password refused"
+    elif grep -qi 'too many failed attempts' <<<"$body"; then
+        record "gateway" login "GET->POST" warn \
+            "the login is rate-limited from this address; the lockout clears on its own"
+    else
+        record "gateway" login "GET->POST" warn \
+            "the login POST gave an answer this check does not recognise"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Run and report
 # ---------------------------------------------------------------------------
 
@@ -445,6 +574,7 @@ check_unit_environment_files
 check_catalog_urls
 check_journal_assertions
 check_seeded_state
+check_admin_session
 
 # A `warn` result is informational and must not fail the deployment.
 FAILURES=0

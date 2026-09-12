@@ -502,6 +502,38 @@ elif (( ${#SEED_UNSATISFIED[@]} )); then
 fi
 ok "persistent state accounted for"
 
+# --- A9e. the shared portal configuration ----------------------------------
+#
+# shared/config/config.intranet.json holds this site's settings and secrets. It
+# is written once and hand-edited afterwards, so every upgrade meets a file an
+# operator wrote for an older release. Checking it here -- against the schema of
+# the release in the archive, not the one that is running -- means an
+# incompatible or ambiguous config stops the deployment while the current
+# release is still serving, instead of becoming a portal that will not start
+# after the symlink has already moved.
+#
+# The validator is extracted from the archive rather than run from the installed
+# release, because in Phase A nothing has been unpacked yet.
+
+step "A9e. validating the shared portal configuration"
+
+CONFIG_STAGE="$(mktemp -d)"
+on_cleanup "rm -rf '${CONFIG_STAGE}'"
+# The gateway's directory and source root come from the manifest rather than
+# being spelled here, so renaming either in the manifest cannot leave this
+# quietly extracting nothing and reporting the config unchecked.
+GATEWAY_DIR="$(svc gateway dir ml_server)"
+GATEWAY_SRC="$(svc gateway src src)"
+mkdir -p "${CONFIG_STAGE}/apps/${GATEWAY_DIR}/${GATEWAY_SRC}"
+if tar -xzf "$ARCHIVE" -C "${CONFIG_STAGE}/apps/${GATEWAY_DIR}/${GATEWAY_SRC}" \
+        --strip-components=4 \
+        "${ARCHIVE_PREFIX}/apps/${GATEWAY_DIR}/${GATEWAY_SRC}/ml_server" 2>/dev/null; then
+    config_preflight "$CONFIG_STAGE" \
+        || die "refusing to deploy over a shared configuration this release cannot use"
+else
+    warn "the archive carries no ml_server sources to validate the config with; skipped"
+fi
+
 # --- A10. the plan ---------------------------------------------------------
 
 CHANGED_SERVICES=()
@@ -764,6 +796,20 @@ step "B4b. seeding persistent state"
 ML_SEED_RELEASE="$TARGET_RELEASE"
 seed_run apply
 ok "persistent state present"
+
+# --- B4c. migrate the shared portal configuration --------------------------
+#
+# After B4b, so a first install has a config to migrate. Well before B7, so the
+# release is only ever activated over a configuration that has been validated
+# against its own schema -- and so a failure here still leaves `current`
+# pointing at the release that is serving, with nothing to roll back.
+#
+# The original is copied to config.intranet.json.bak-<stamp> before anything is
+# written, and the file is left exactly as it was when nothing needed changing.
+
+step "B4c. validating and migrating the shared portal configuration"
+config_migrate_apply "$TARGET_RELEASE" "$STAMP" \
+    || fail_and_rollback "the shared portal configuration could not be prepared for ${TARGET_VERSION}"
 
 # --- B5. dependencies ------------------------------------------------------
 

@@ -393,16 +393,22 @@ scenario_data_survives() {
     printf 'scientific-results-must-survive\n' >"${root}/shared/data/engagement.sqlite3"
     printf 'user-upload\n'                     >"${root}/shared/uploads/sample.tif"
     head -c 4096 /dev/urandom                  >"${root}/shared/models/hydride/checkpoint.pt"
-    printf '{"admin_token": "secret"}\n'       >"${root}/shared/config/config.intranet.json"
+    printf '{"security": {"admin_token": "secret"}}\n' >"${root}/shared/config/config.intranet.json"
 
     # Compare the state that belongs to users and to science. shared/logs and
     # shared/state are the deployment's own bookkeeping and are expected to grow
     # on every run; treating them as user data would make this assertion fail
     # for a reason that has nothing to do with data safety.
+    #
+    # config.intranet.json is excluded from the byte comparison on purpose and
+    # asserted separately below: an upgrade MAY rewrite it, because a new
+    # release can need settings an older file does not carry. What it may never
+    # do is lose a value the operator put there. See scenario_config_migration.
     user_data_sums() {
         find "${root}/shared/data" "${root}/shared/uploads" \
              "${root}/shared/models" "${root}/shared/config" \
-             -type f -exec sha256sum {} \; 2>/dev/null | LC_ALL=C sort
+             -type f ! -name 'config.intranet.json' ! -name 'config.intranet.json.bak-*' \
+             -exec sha256sum {} \; 2>/dev/null | LC_ALL=C sort
     }
 
     local sums_before
@@ -418,6 +424,10 @@ scenario_data_survives() {
     # And the model directory must be reachable from inside the new release.
     assert "hydride checkpoints are visible in the new release" \
         test -f "${root}/current/apps/HydrideSegmentation/frozen_checkpoints/checkpoint.pt"
+
+    # The one value in the portal config is a secret nothing can regenerate.
+    assert "the hand-written admin token survives the upgrade" bash -c \
+        "grep -q 'secret' '${root}/shared/config/config.intranet.json'"
 }
 
 # The three v1.4.0 failures, each of which passed every check the suite had at
@@ -521,6 +531,119 @@ scenario_seed_is_not_overwritten() {
     update "$root" "$a2" --intranet-host 10.255.255.1 --force >/dev/null 2>&1 || true
     assert_eq "a further deployment changes nothing" "$after_two" \
         "$(sha256sum "$env_file" | cut -d' ' -f1)"
+}
+
+# The shared portal configuration: migrated, never clobbered.
+#
+# shared/config/config.intranet.json is the file that holds this site's admin
+# token and its HTTP/HTTPS choice. It is seeded once and hand-edited afterwards,
+# so every upgrade meets a file written for an older release -- and losing a
+# value in it is not recoverable from anything in the archive.
+#
+# The scenario needs the real ml_server config modules in the fixture; without
+# them update.sh has nothing to migrate with and skips the step, and asserting
+# on a skipped step would be asserting on nothing.
+
+scenario_config_migration() {
+    local root a1 a2 config output
+    root="$(new_root config_migration)"
+    a1="$(build_archive 1.0.0)" || return 1
+    a2="$(build_archive 1.1.0)" || return 1
+
+    update "$root" "$a1" >/dev/null 2>&1 || { fail "baseline install failed"; return 1; }
+
+    config="${root}/shared/config/config.intranet.json"
+    mkdir -p "$(dirname "$config")"
+
+    if ! tar -tzf "$a2" 2>/dev/null | grep -q 'apps/ml_server/src/ml_server/config_cli.py'; then
+        info "the fixture carries no ml_server config tool; set ML_SERVER_SOURCE to run this"
+        pass "config_migration skipped (no config tool in the fixture)"
+        return 0
+    fi
+
+    # A pre-versioned config, in the shape a v1.4-era office server holds it:
+    # no schema version, a placeholder secret, a real token typed by an
+    # operator, and a legacy camelCase spelling of a setting.
+    cat >"$config" <<'JSON'
+{
+    "debug": false,
+    "secret_key": "__SET_SECRET_KEY__",
+    "host": "127.0.0.1",
+    "port": 5000,
+    "email": {"developer_address": "someone@office.example"},
+    "security": {
+        "csrf_enabled": true,
+        "sslEnabled": false,
+        "admin_token": "the-operators-real-token"
+    }
+}
+JSON
+
+    output="$(update "$root" "$a2" 2>&1)" || { fail "upgrade failed"; info "$output"; return 1; }
+    assert_eq "the upgrade completed" "1.1.0" "$(active_version "$root")"
+
+    assert "the admin token survives untouched" bash -c \
+        "grep -q 'the-operators-real-token' '${config}'"
+    assert "the site-specific email address survives" bash -c \
+        "grep -q 'someone@office.example' '${config}'"
+    assert "a schema version was written" bash -c \
+        "grep -q '\"config_version\"' '${config}'"
+    assert "the legacy camelCase spelling is gone" bash -c \
+        "! grep -q 'sslEnabled' '${config}'"
+    assert "the canonical spelling is present" bash -c \
+        "grep -q 'ssl_enabled' '${config}'"
+    assert "the placeholder secret is not the signing key" bash -c \
+        "! grep -q '__SET_SECRET_KEY__' '${config}'"
+    assert "the original was backed up beside it" bash -c \
+        "ls '${root}/shared/config/'config.intranet.json.bak-* >/dev/null 2>&1"
+    assert "and in the release checkpoint" bash -c \
+        "ls '${root}/backups/'*/config/config.intranet.json >/dev/null 2>&1"
+
+    # A second upgrade over an already-migrated file must change nothing: an
+    # upgrade that rewrites the config every time would fill shared/config with
+    # backups and make a real change impossible to spot.
+    local before; before="$(sha256sum "$config" | cut -d' ' -f1)"
+    update "$root" "$a2" --force >/dev/null 2>&1 || true
+    assert_eq "a further deployment leaves the config alone" "$before" \
+        "$(sha256sum "$config" | cut -d' ' -f1)"
+}
+
+# A config this release cannot resolve must stop the deployment in preflight,
+# with the running release untouched -- not halfway through, and not after the
+# symlink has moved.
+
+scenario_config_ambiguous_refused() {
+    local root a1 a2 config output rc=0
+    root="$(new_root config_ambiguous_refused)"
+    a1="$(build_archive 1.0.0)" || return 1
+    a2="$(build_archive 1.1.0)" || return 1
+
+    update "$root" "$a1" >/dev/null 2>&1 || { fail "baseline install failed"; return 1; }
+
+    if ! tar -tzf "$a2" 2>/dev/null | grep -q 'apps/ml_server/src/ml_server/config_cli.py'; then
+        pass "config_ambiguous_refused skipped (no config tool in the fixture)"
+        return 0
+    fi
+
+    config="${root}/shared/config/config.intranet.json"
+    # Two spellings of the admin token, with two different values. Choosing one
+    # would be a guess about which credential the operator meant.
+    cat >"$config" <<'JSON'
+{
+    "security": {
+        "admin_token": "one-token",
+        "adminToken": "a-completely-different-token"
+    }
+}
+JSON
+    local before; before="$(sha256sum "$config" | cut -d' ' -f1)"
+
+    output="$(update "$root" "$a2" 2>&1)" || rc=$?
+    assert "the deployment was refused" test "$rc" -ne 0
+    assert_contains "it said why" "$output" "adminToken"
+    assert_eq "the running release is untouched" "1.0.0" "$(active_version "$root")"
+    assert_eq "the config was not modified" "$before" \
+        "$(sha256sum "$config" | cut -d' ' -f1)"
 }
 
 scenario_missing_checkpoints() {
@@ -1068,6 +1191,8 @@ SCENARIOS=(
     data_survives
     seeded_state
     seed_is_not_overwritten
+    config_migration
+    config_ambiguous_refused
     docs_build
     docs_build_never_fails_a_deployment
     docs_skipped_on_request

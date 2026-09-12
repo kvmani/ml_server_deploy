@@ -60,13 +60,21 @@ DEPLOYED_AT="$(printf '%s' "$LAST_RECORD" | sed -n 's/.*"deployed_utc": "\([^"]*
 # JSON
 # ---------------------------------------------------------------------------
 
+# The portal's own view of its configuration: which file it reads, what schema
+# version that file is, whether the site is HTTP or HTTPS, and whether an admin
+# credential exists. Every field is a boolean, a number or a fixed word -- the
+# application produces it precisely so that this can be printed without any risk
+# of putting a token or a signing key on somebody's terminal.
+CONFIG_SUMMARY="$(config_summary_json "$RELEASE_PATH" || true)"
+
 if (( JSON_OUT )); then
-    python3 - "$ML_MANIFEST" "$ML_ROOT" "$RELEASE_PATH" "$ARCHIVE_SHA" "${DEPLOYED_AT:-unknown}" <<'PYEOF'
+    python3 - "$ML_MANIFEST" "$ML_ROOT" "$RELEASE_PATH" "$ARCHIVE_SHA" "${DEPLOYED_AT:-unknown}" "$CONFIG_SUMMARY" <<'PYEOF'
 import json
 import subprocess
 import sys
 
 manifest_path, root, release, sha, deployed = sys.argv[1:6]
+config_summary = sys.argv[6] if len(sys.argv) > 6 else ""
 with open(manifest_path, encoding="utf-8") as handle:
     document = json.load(handle)
 
@@ -88,6 +96,11 @@ for name, service in document.get("services", {}).items():
         entry["active"] = probe.stdout.strip() or "unknown"
     services[name] = entry
 
+try:
+    portal_config = json.loads(config_summary) if config_summary.strip() else None
+except ValueError:
+    portal_config = None
+
 print(json.dumps({
     "root": root,
     "installed": True,
@@ -95,6 +108,8 @@ print(json.dumps({
     "release_path": release,
     "archive_sha256": sha,
     "deployed_utc": deployed,
+    # Secret-free by construction: see config_schema.summarize().
+    "portal_config": portal_config,
     "services": services,
 }, indent=2))
 PYEOF
@@ -154,6 +169,48 @@ if [[ -n "$ENV_FILE" ]]; then
     else
         printf '  environment      %s  MISSING -- the portal will link to loopback\n' "$ENV_FILE"
     fi
+fi
+
+say ""
+say "  Portal configuration and admin access"
+say "  ---------------------------------------------------------------"
+printf '  config file      %s\n' "$(portal_config_path)"
+if [[ -n "$CONFIG_SUMMARY" ]]; then
+    cfg_schema="$(config_summary_field "$CONFIG_SUMMARY" schema_version)"
+    cfg_wanted="$(config_summary_field "$CONFIG_SUMMARY" expected_schema_version)"
+    cfg_scheme="$(config_summary_field "$CONFIG_SUMMARY" scheme)"
+    cfg_ssl="$(config_summary_field "$CONFIG_SUMMARY" ssl_enabled)"
+    cfg_cookie="$(config_summary_field "$CONFIG_SUMMARY" session_cookie_secure)"
+    cfg_csrf="$(config_summary_field "$CONFIG_SUMMARY" csrf_enabled)"
+    cfg_proxies="$(config_summary_field "$CONFIG_SUMMARY" trusted_proxy_count)"
+    cfg_admin="$(config_summary_field "$CONFIG_SUMMARY" admin_authentication_configured)"
+    cfg_kind="$(config_summary_field "$CONFIG_SUMMARY" admin_credential_kind)"
+    cfg_secret="$(config_summary_field "$CONFIG_SUMMARY" secret_key_configured)"
+
+    if [[ "$cfg_schema" == "$cfg_wanted" ]]; then
+        printf '  schema version   %s\n' "$cfg_schema"
+    else
+        printf '  schema version   %s  (this release expects %s -- run update.sh to migrate)\n' \
+            "$cfg_schema" "$cfg_wanted"
+    fi
+    printf '  mode             %s  (ssl_enabled=%s)\n' "$cfg_scheme" "$cfg_ssl"
+    printf '  session cookie   Secure=%s  HttpOnly=True  SameSite=Lax\n' "$cfg_cookie"
+    printf '  CSRF protection  %s\n' "$cfg_csrf"
+    printf '  trusted proxies  %s\n' "$cfg_proxies"
+    printf '  signing key      %s\n' \
+        "$([[ "$cfg_secret" == "True" ]] && echo 'set in the config file' \
+            || echo 'generated and persisted beside the config (shared/config/.session_secret_key)')"
+    if [[ "$cfg_admin" == "True" ]]; then
+        printf '  admin auth       configured (%s)\n' "$cfg_kind"
+    else
+        printf '  admin auth       NOT CONFIGURED -- the console refuses every login\n'
+        printf '                   set security.admin_token in the config file and restart the portal\n'
+    fi
+    printf '  admin console    http://%s:%s/admin/\n' "$(detect_intranet_host)" "$(svc gateway port)"
+    # No value above is a secret: the application produces this summary in
+    # exactly this shape so status output can never leak a token or a key.
+else
+    printf '  summary          unavailable (no config file, or this release ships no config tool)\n'
 fi
 
 say ""

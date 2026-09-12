@@ -23,6 +23,7 @@ Two knobs let scenarios inject failure:
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -46,6 +47,8 @@ can run with the package mirror deliberately switched off.
 import json
 import os
 import sys
+import urllib.parse
+import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 SERVICE = "@SERVICE@"
@@ -93,14 +96,88 @@ if REQUIRES_MODELS:
     sys.stderr.flush()
 
 
+# The admin console, reproduced only as far as its session and CSRF mechanics.
+#
+# health_check.sh asserts the GET -> POST login lifecycle, because "/health is
+# 200" was exactly the check that passed while nobody could sign in. A stub that
+# serves no /admin/login would make that assertion untestable here, so the
+# gateway fixture issues a real session cookie, renders a real token into the
+# form, and refuses a POST whose token does not match the cookie -- giving the
+# same two distinguishable answers the portal gives.
+IS_GATEWAY = SERVICE == "gateway"
+ADMIN_SESSIONS = {}
+# Mirrors the portal in plain-HTTP intranet mode: NOT Secure, because a Secure
+# cookie is never returned over HTTP and that is the failure being guarded.
+ADMIN_COOKIE = "session={value}; HttpOnly; Path=/; SameSite=Lax"
+
+
+def admin_login_page(token):
+    return (
+        "<html><body><h1>Administrator sign in</h1>"
+        "<form method='post' action='/admin/login'>"
+        '<input type="hidden" name="csrf_token" value="' + token + '">'
+        "<input type='password' name='password'>"
+        "</form></body></html>"
+    )
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *args):
         sys.stderr.write(f"{SERVICE} {fmt % args}\\n")
 
+    def _send(self, code, body, content_type="text/html", cookie=None):
+        payload = body.encode()
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(payload)))
+        if cookie:
+            self.send_header("Set-Cookie", cookie)
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def _cookies(self):
+        jar = {}
+        for part in (self.headers.get("Cookie") or "").split(";"):
+            if "=" in part:
+                name, _, value = part.strip().partition("=")
+                jar[name] = value
+        return jar
+
+    def do_POST(self):  # noqa: N802
+        path = self.path.split("?", 1)[0]
+        if not (IS_GATEWAY and path == "/admin/login"):
+            self.send_error(404, "no such route in the fixture")
+            return
+        length = int(self.headers.get("Content-Length") or 0)
+        form = urllib.parse.parse_qs(self.rfile.read(length).decode())
+        session_id = self._cookies().get("session", "")
+        submitted = (form.get("csrf_token") or [""])[0]
+        expected = ADMIN_SESSIONS.get(session_id)
+        if not expected or not submitted or submitted != expected:
+            # The production symptom, reproduced: the token could not be tied
+            # back to the session that rendered it.
+            self._send(200, "<html><body>This form expired.</body></html>")
+            return
+        # The token round-tripped and only the password is wrong, which is what
+        # a healthy deployment answers and what health_check.sh reads as a pass.
+        self._send(200, "<html><body>Incorrect password.</body></html>")
+
     def do_GET(self):  # noqa: N802
         path = self.path.split("?", 1)[0]
+
+        if IS_GATEWAY and path == "/admin/login":
+            session_id = uuid.uuid4().hex
+            token = uuid.uuid4().hex
+            ADMIN_SESSIONS[session_id] = token
+            self._send(
+                200,
+                admin_login_page(token),
+                cookie=ADMIN_COOKIE.format(value=session_id),
+            )
+            return
+
         body = ROUTES.get(path)
 
         if CATALOG and path == "/api/catalog":
@@ -350,6 +427,38 @@ def build(out_dir: Path, version: str) -> Path:
                 ),
             }
 
+
+    # The real configuration schema, carried into the gateway fixture.
+    #
+    # update.sh validates and migrates shared/config/config.intranet.json with
+    # the code from the release being installed, so a fixture whose gateway has
+    # no ml_server package silently skips that step -- and the rehearsal would
+    # then prove nothing about the migration that actually runs in the office.
+    # These two modules import nothing but the standard library, so copying them
+    # costs nothing and keeps the rehearsal honest. The schema is not duplicated
+    # here: it is the very file the portal uses.
+    #
+    # When no ml_server checkout is at hand the copy is skipped and the
+    # config_migration scenario skips itself, rather than testing a stale copy.
+    gateway_dir = manifest["services"]["gateway"].get("dir", "ml_server")
+    source_root = Path(
+        os.environ.get("ML_SERVER_SOURCE") or (REPO_ROOT.parent / "ml_server")
+    )
+    package = source_root / "src" / "ml_server"
+    if (package / "config_cli.py").is_file():
+        target = sources / gateway_dir / "src" / "ml_server"
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "__init__.py").write_text("", encoding="utf-8", newline="\n")
+        for name in ("config_schema.py", "config_cli.py"):
+            # Bytes, not text: the file must reach the Ubuntu fixture exactly as
+            # the release archive would deliver it, LF endings included.
+            (target / name).write_bytes((package / name).read_bytes())
+        print(f"fixture config schema: from {package}", file=sys.stderr)
+    else:
+        print(
+            f"fixture config schema: SKIPPED, no ml_server checkout at {source_root}",
+            file=sys.stderr,
+        )
 
     # The gateway's declared route checks must match what the stub serves.
     manifest["services"]["gateway"]["gateway_checks"] = [

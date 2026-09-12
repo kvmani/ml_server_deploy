@@ -1169,3 +1169,164 @@ docs_build_one() {
     ok "docs ${id}: built into ${target} ($(du -sh "$abs" 2>/dev/null | cut -f1 || echo '?'))"
     return 0
 }
+
+# ---------------------------------------------------------------------------
+# The portal's shared configuration
+# ---------------------------------------------------------------------------
+#
+# ~/ml_platform/shared/config/config.intranet.json is the one file that holds
+# this site's settings and secrets. It is seeded once and hand-edited
+# afterwards, so every release that follows meets a file an operator wrote for
+# an older release. Three rules follow from that, and they are the whole reason
+# this section exists:
+#
+#   * it is NEVER blindly overwritten -- the values in it cannot be regenerated;
+#   * it is validated against the NEW release's schema BEFORE `current` moves,
+#     so an incompatible config is a preflight refusal rather than a portal that
+#     will not start after the swap;
+#   * a migration copies the original beside it first, so an operator can always
+#     put back exactly what was there.
+#
+# The work itself is done by ml_server.config_cli in the release being
+# installed, not by shell: the schema belongs to the application, and a copy of
+# it in bash would drift from it within one release.
+
+#: Path of the live shared configuration, relative to the deployment root.
+ML_PORTAL_CONFIG_REL="shared/config/config.intranet.json"
+
+portal_config_path() {
+    printf '%s\n' "${ML_ROOT}/${ML_PORTAL_CONFIG_REL}"
+}
+
+# config_tool <release-dir> <action> [args...]
+#
+# Run the config CLI out of <release-dir>, using the deployment venv's
+# interpreter but the release's own source tree. PYTHONPATH rather than an
+# install, so this works in preflight -- before the new release's dependencies
+# have been installed and long before `current` points at it.
+#
+# Exit codes come straight from ml_server.config_cli:
+#   0 usable   1 invalid   2 ambiguous, a human must decide   3 unreadable
+# and 4 is added here for "this release has no config tool", which is what an
+# older release looks like and must not be treated as a failure.
+config_tool() {
+    local release="$1"; shift
+    local dir src python
+    # From the manifest when one is loaded, and from the office layout's own
+    # names otherwise -- status.sh and health_check.sh always have a manifest,
+    # while update.sh calls this against a staging directory in preflight.
+    dir="$(svc gateway dir ml_server 2>/dev/null || echo ml_server)"
+    src="${release}/apps/${dir:-ml_server}/$(svc gateway src src 2>/dev/null || echo src)"
+    python="${ML_VENV}/bin/python"
+
+    [[ -f "${src}/ml_server/config_cli.py" ]] || return 4
+    [[ -x "$python" ]] || python="$(command -v python3 || true)"
+    [[ -n "$python" ]] || return 4
+
+    PYTHONPATH="$src" "$python" -m ml_server.config_cli "$@"
+}
+
+# config_preflight <release-dir>
+#
+# Phase A. Reports what migrating the live config would do, and refuses the
+# deployment when that would be a guess or the result would not validate.
+# Changes nothing.
+config_preflight() {
+    local release="$1"
+    local config output status
+    config="$(portal_config_path)"
+
+    if [[ ! -f "$config" ]]; then
+        log "  no shared config at ${config} yet; it will be seeded from the release"
+        return 0
+    fi
+
+    set +e
+    output="$(config_tool "$release" plan "$config" 2>&1)"
+    status=$?
+    set -e
+
+    case "$status" in
+        0)
+            printf '%s\n' "$output" | while IFS= read -r line; do log "  ${line}"; done
+            ok "  shared config is usable by this release"
+            return 0
+            ;;
+        4)
+            warn "  this release ships no config validator; the shared config is not checked"
+            return 0
+            ;;
+        1)
+            err "  the shared config is not valid for this release:"
+            ;;
+        2)
+            err "  the shared config cannot be migrated without a decision:"
+            ;;
+        3)
+            err "  the shared config cannot be read:"
+            ;;
+        *)
+            err "  the config check failed unexpectedly (exit ${status}):"
+            ;;
+    esac
+    printf '%s\n' "$output" | while IFS= read -r line; do err "    ${line}"; done
+    err "  file: ${config}"
+    err "  NOTHING HAS BEEN CHANGED. Fix the file and run this command again."
+    return 1
+}
+
+# config_migrate_apply <release-dir> <stamp>
+#
+# Phase B, before the symlink swap. Migrates in place with a backup. A failure
+# here is a hard failure: the caller must not activate a release whose
+# configuration it could not prepare.
+config_migrate_apply() {
+    local release="$1" stamp="$2"
+    local config output status
+    config="$(portal_config_path)"
+
+    if [[ ! -f "$config" ]]; then
+        warn "  no shared config at ${config}; the portal will fall back to its defaults"
+        return 0
+    fi
+
+    set +e
+    output="$(config_tool "$release" migrate "$config" --stamp "$stamp" 2>&1)"
+    status=$?
+    set -e
+
+    if (( status == 4 )); then
+        warn "  this release ships no config migrator; ${ML_PORTAL_CONFIG_REL} left untouched"
+        return 0
+    fi
+    printf '%s\n' "$output" | while IFS= read -r line; do log "  ${line}"; done
+    if (( status != 0 )); then
+        err "  migrating ${ML_PORTAL_CONFIG_REL} failed (exit ${status})"
+        return 1
+    fi
+    ok "  shared config validated and migrated; original kept alongside it"
+    return 0
+}
+
+# config_summary_json <release-dir>
+#
+# The secret-free description of the live configuration, as JSON, for status.sh
+# and health_check.sh. Prints nothing and returns non-zero when unavailable.
+config_summary_json() {
+    local release="$1"
+    local config
+    config="$(portal_config_path)"
+    [[ -f "$config" ]] || return 1
+    config_tool "$release" summary "$config" --json 2>/dev/null
+}
+
+# config_summary_field <json> <key>
+config_summary_field() {
+    python3 -c '
+import json, sys
+try:
+    print(json.loads(sys.argv[1]).get(sys.argv[2], ""))
+except Exception:
+    print("")
+' "$1" "$2" 2>/dev/null || printf '\n'
+}
