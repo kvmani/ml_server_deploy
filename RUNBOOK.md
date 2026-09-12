@@ -75,6 +75,28 @@ the engagement database, uploads, model checkpoints, configuration — lives
 outside every release directory. Going back to an older release cannot revert or
 delete any of it.
 
+**One exception, from suite 1.8.0: the Online Annotator database.** Annotator
+1.1.0 upgrades its database to schema 2 the first time it starts, in place and
+additively. That is safe going forward and your annotations are never at risk,
+but annotator 1.0.x deliberately **refuses to start on a schema-2 database**
+rather than silently ignoring columns it does not understand. So rolling the
+suite back past 1.8.0 leaves `ml-platform-annotator.service` failing to start
+with "Database schema 2 is newer than this release supports", while every other
+service rolls back normally.
+
+If you must go back that far, restore the annotator data directory from the
+backup taken before the upgrade:
+
+```bash
+sudo systemctl stop ml-platform-annotator.service
+mv ~/ml_platform/shared/data/online_annotator ~/ml_platform/shared/data/online_annotator.schema2
+# restore your pre-upgrade copy to ~/ml_platform/shared/data/online_annotator
+sudo systemctl start ml-platform-annotator.service
+```
+
+Keep the `.schema2` copy: it holds every annotation made since the upgrade, and
+going forward to 1.8.0 again makes it usable.
+
 ### Look at the logs
 
 ```bash

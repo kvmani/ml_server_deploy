@@ -14,7 +14,7 @@
 # production release.
 
 schema: ml-suite.manifest.v1
-suite_version: 1.7.0
+suite_version: 1.8.0
 
 platform:
   os_id: ubuntu
@@ -505,8 +505,14 @@ services:
     # The portal link is host-relative (":5000/"): the browser resolves it against
     # the address the user typed, so it works from every desk without knowing
     # this host's intranet address.
+    #
+    # Suite 1.8.0 takes annotator 1.1.0, which migrates its database to schema 2
+    # on first start (in place, additive, annotations untouched). Annotator 1.0.x
+    # refuses to start on a schema-2 database by design, so a rollback past this
+    # suite release needs the annotator data directory restored from backup --
+    # see "Rollback" in RUNBOOK.md. Every other component rolls back normally.
     repo: kvmani/OnlineAnnotator
-    ref: v1.0.1
+    ref: v1.1.0
     commit: ""
     dir: OnlineAnnotator
     import_check: online_annotator
