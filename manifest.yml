@@ -14,7 +14,7 @@
 # production release.
 
 schema: ml-suite.manifest.v1
-suite_version: 1.9.0
+suite_version: 1.10.0
 
 platform:
   os_id: ubuntu
@@ -526,8 +526,17 @@ services:
     #
     # 1.1.1 is 1.1.0 with two flaky browser tests fixed; no product code differs.
     # It is taken here because its tag is the one with a green CI run.
+    #
+    # Annotator 2.0.0 (suite 1.10.0): every user can annotate AND review, switching
+    # an Annotate / Review working mode in the web UI; administrator is a separate
+    # privilege. On its first start it saves a copy of its database under
+    # shared/data/online_annotator/backups/ and upgrades it to schema 3
+    # (users.role -> is_admin + active_mode; administrators stay administrators,
+    # former reviewers start in Review mode). Annotator 1.x refuses a schema-3
+    # database, so rolling the suite back past 1.10.0 needs that copy restored --
+    # see "Rollback" in RUNBOOK.md. Nothing else in the suite is affected.
     repo: kvmani/OnlineAnnotator
-    ref: v1.1.1
+    ref: v2.0.0
     commit: ""
     dir: OnlineAnnotator
     import_check: online_annotator

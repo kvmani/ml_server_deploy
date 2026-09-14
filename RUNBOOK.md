@@ -109,6 +109,29 @@ sudo systemctl start ml-platform-annotator.service
 Keep the `.schema2` copy: it holds every annotation made since the upgrade, and
 going forward to 1.8.0 again makes it usable.
 
+**The same applies from suite 1.10.0, schema 3.** Annotator 2.0.0 replaces the
+annotator/reviewer roles with working modes and upgrades its database to schema 3
+on first start. Before changing anything it saves a consistent copy of the
+database in `shared/data/online_annotator/backups/` (the journal names the file,
+for example `online_annotator.schema2.20260915T031500123456Z.sqlite3`). Rolling
+the suite back past 1.10.0 leaves the annotator refusing "Database schema 3 is
+newer than this release supports" until you put that copy back:
+
+```bash
+sudo systemctl stop ml-platform-annotator.service
+cd ~/ml_platform/shared/data/online_annotator
+mkdir -p schema3-set-aside
+mv online_annotator.sqlite3* schema3-set-aside/      # the database and its -wal/-shm together
+cp backups/online_annotator.schema2.<stamp>.sqlite3 online_annotator.sqlite3
+sudo systemctl start ml-platform-annotator.service
+```
+
+Keep `schema3-set-aside/` whole (never separate a database from its `-wal`
+file): it holds the work done since the upgrade, and going forward to 1.10.0
+again makes it usable. To check what an annotator release will do with the data before
+starting it, run `python -m online_annotator db-status` from its directory with
+`ONLINE_ANNOTATOR_DATA_DIR` set (exit 0 up to date, 1 upgrade pending, 2 newer).
+
 ### What happens when a deployment fails
 
 `update.sh` is in two halves, and where it stops decides what it does.
@@ -389,6 +412,19 @@ Lost the administrator password later:
 cd ~/ml_platform/current/apps/OnlineAnnotator
 ONLINE_ANNOTATOR_DATA_DIR=~/ml_platform/shared/data/online_annotator \
   PYTHONPATH=src ~/ml_platform/.venv/bin/python -m online_annotator reset-password lead.scientist@lab.example
+```
+
+**Accounts (annotator 2.0.0, suite 1.10.0).** There are no annotator or
+reviewer accounts. Every user both annotates and reviews, and switches between
+**Annotate** and **Review** at the top of the page; nobody reviews their own
+submissions. Administrator is a separate privilege, ticked per person on the
+Users page or given on the command line:
+
+```bash
+cd ~/ml_platform/current/apps/OnlineAnnotator
+ONLINE_ANNOTATOR_DATA_DIR=~/ml_platform/shared/data/online_annotator \
+  PYTHONPATH=src ~/ml_platform/.venv/bin/python -m online_annotator create-user colleague@lab.example --name "A Colleague"
+# add --admin to also let them manage projects, classes and accounts
 ```
 
 Its "All tools" link needs no configuration: it is host-relative (`:5000/`).
