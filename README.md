@@ -156,3 +156,10 @@ way they do on the server.
 
 Nothing outside `~/rehearsal` is touched, and the units it installs are removed
 at the end of the run.
+
+GitHub Actions does not run the rehearsal: CI is kept lean (manifest, text
+hygiene, shell syntax, unit tests) and the release workflow keeps only the gates
+the air-gapped install depends on (pins resolved to commits, pip check and
+imports, archive assembly). Run the rehearsal here whenever `deploy/` or
+`tests/rehearsal/` change, and before tagging a suite release that includes such
+a change.

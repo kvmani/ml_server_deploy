@@ -14,7 +14,7 @@
 # production release.
 
 schema: ml-suite.manifest.v1
-suite_version: 1.11.0
+suite_version: 1.12.0
 
 platform:
   os_id: ubuntu
@@ -535,8 +535,17 @@ services:
     # former reviewers start in Review mode). Annotator 1.x refuses a schema-3
     # database, so rolling the suite back past 1.10.0 needs that copy restored --
     # see "Rollback" in RUNBOOK.md. Nothing else in the suite is affected.
+    #
+    # Annotator 2.1.0 (suite 1.12.0): mask import explains what it detected and which
+    # class numbers it will store before anything is saved, asks for confirmation when
+    # a file reads two ways, needs an explicit threshold for greyscale images, and records
+    # the interpretation (mask_import) in versions, the audit trail and export manifests.
+    # It pairs HydrideSegmentation's <stem>_mask_labels.png / _mask_preview.png. On first
+    # start it backs up its database and upgrades it to schema 4 (additive columns
+    # images/versions.mask_import_details); annotator 2.0.x refuses a schema-4 database,
+    # so rolling back past 1.12.0 needs that copy restored -- see "Rollback" in RUNBOOK.md.
     repo: kvmani/OnlineAnnotator
-    ref: v2.0.0
+    ref: v2.1.0
     commit: ""
     dir: OnlineAnnotator
     import_check: online_annotator
@@ -597,7 +606,14 @@ services:
     repo: Pushpalathadevi/HydrideSegmentation
     # Tagged v1.0.1 in that repository with the owner's authorisation, so this
     # is pinned the same way as every other component.
-    ref: v1.0.1
+    #
+    # v1.1.0 (suite 1.12.0), also tagged with the owner's authorisation: the web
+    # "Download mask" menu adds <stem>_mask_labels.png (class IDs 0/1, for training and
+    # OnlineAnnotator), <stem>_mask_preview.png (display 0/255) and <stem>_masks.zip with
+    # JSON metadata; the previous mask download is unchanged. No new dependencies and no
+    # persistent state. Its version files still read 1.0.0 (the bump is uncommitted in that
+    # repository); the resolved commit in the released manifest is the exact identity.
+    ref: v1.1.0
     commit: ""
     # Flat package at the repository root, not a src/ layout like the others.
     dir: HydrideSegmentation

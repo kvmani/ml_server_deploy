@@ -132,6 +132,26 @@ again makes it usable. To check what an annotator release will do with the data 
 starting it, run `python -m online_annotator db-status` from its directory with
 `ONLINE_ANNOTATOR_DATA_DIR` set (exit 0 up to date, 1 upgrade pending, 2 newer).
 
+**And from suite 1.12.0, schema 4.** Annotator 2.1.0 records how every imported
+mask file was interpreted and adds one column for it to images and versions,
+upgrading the database to schema 4 on first start. As before, it first saves a copy
+in `shared/data/online_annotator/backups/` (for example
+`online_annotator.schema3.<stamp>.sqlite3`). Rolling the suite back past 1.12.0
+leaves the annotator refusing "Database schema 4 is newer than this release
+supports" until that copy is put back:
+
+```bash
+sudo systemctl stop ml-platform-annotator.service
+cd ~/ml_platform/shared/data/online_annotator
+mkdir -p schema4-set-aside
+mv online_annotator.sqlite3* schema4-set-aside/      # the database and its -wal/-shm together
+cp backups/online_annotator.schema3.<stamp>.sqlite3 online_annotator.sqlite3
+sudo systemctl start ml-platform-annotator.service
+```
+
+Keep `schema4-set-aside/` whole: it holds the work done since the upgrade, including
+the interpretation records of masks imported with 2.1.0.
+
 ### What happens when a deployment fails
 
 `update.sh` is in two halves, and where it stops decides what it does.

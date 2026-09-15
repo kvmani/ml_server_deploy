@@ -3,6 +3,10 @@ name: Build suite release
 # Tagging the deployment repository is the only action a routine release needs.
 # Everything below runs on the Internet side; the office server never talks to
 # GitHub and only ever sees the two files attached to the Release.
+#
+# Lean by design: only the gates the air-gapped install depends on. Archive
+# reproducibility is covered by tests/unit (test_the_archive_is_reproducible),
+# and the systemd rehearsal runs on the development machine (README).
 
 on:
   push:
@@ -22,6 +26,7 @@ jobs:
     # Must match the office platform: the dependency gate below is only
     # meaningful if it resolves on the same distribution and Python.
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
 
     steps:
       - name: Check out the deployment repository
@@ -34,10 +39,10 @@ jobs:
           python-version: "3.12"
 
       - name: Install build tooling
-        run: python -m pip install --upgrade pip pyyaml
+        run: python -m pip install --upgrade pip pyyaml pytest
 
       # ---------------------------------------------------------------
-      # Gate 1: the manifest itself, and the Windows-artifact checks.
+      # Gate 1: the manifest, the Windows-artifact checks, the unit tests.
       # ---------------------------------------------------------------
 
       - name: Validate the manifest
@@ -83,17 +88,9 @@ jobs:
           done
           exit $fail
 
-      - name: ShellCheck
-        working-directory: deploy-repo
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y shellcheck
-          shellcheck -S warning -x deploy/*.sh deploy/lib/*.sh tests/rehearsal/*.sh
-
       - name: Unit tests
         working-directory: deploy-repo
-        run: |
-          python -m pip install pytest
-          python -m pytest tests/unit -q
+        run: python -m pytest tests/unit -q
 
       # ---------------------------------------------------------------
       # Gate 2: resolve every component to an immutable commit.
@@ -208,7 +205,7 @@ jobs:
           fi
 
       # ---------------------------------------------------------------
-      # Assemble, twice, and prove the two builds are identical.
+      # Assemble the archive and publish it.
       # ---------------------------------------------------------------
 
       - name: Assemble the suite archive
@@ -227,56 +224,9 @@ jobs:
           PY
           )
           # shellcheck disable=SC2086
-          sha_one="$(python tools/build_suite.py --manifest manifest.resolved.yml --out dist $args)"
-          mv dist/*.tar.gz /tmp/first.tar.gz
-          # shellcheck disable=SC2086
-          sha_two="$(python tools/build_suite.py --manifest manifest.resolved.yml --out dist $args)"
-
-          if [ "$sha_one" != "$sha_two" ]; then
-            echo "::error::the build is not reproducible: $sha_one vs $sha_two"
-            exit 1
-          fi
-          echo "reproducible: two builds produced $sha_one"
-          echo "sha256=$sha_one" >> "$GITHUB_OUTPUT"
+          sha="$(python tools/build_suite.py --manifest manifest.resolved.yml --out dist $args)"
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
           ls -la dist/
-
-      # ---------------------------------------------------------------
-      # Gate 6: the archive must be able to install itself.
-      # ---------------------------------------------------------------
-
-      # Note: this runs the fixture rehearsal, which exercises the deployment
-      # scripts end to end against purpose-built archives. It does not install
-      # the real archive built above -- that needs the office mirror and the
-      # hydride checkpoints. The real archive is verified on the office staging
-      # root, per RUNBOOK.md.
-      - name: Deployment rehearsal (fixture suite, real systemd)
-        working-directory: deploy-repo
-        run: |
-          set -uo pipefail
-          # The exec bit is tracked in git, but this is cheap insurance and the
-          # CI job does the same; a difference between the two jobs is exactly
-          # the kind of thing that makes one pass and the other fail.
-          chmod +x deploy/*.sh tests/rehearsal/*.sh
-          # GitHub runners have a user systemd session only when linger is on.
-          # If it cannot be enabled, the systemd-dependent scenarios are skipped
-          # here and remain covered by the WSL rehearsal; the rest still run.
-          sudo loginctl enable-linger "$USER" || true
-          XDG_RUNTIME_DIR="/run/user/$(id -u)"
-          export XDG_RUNTIME_DIR
-          rc=0
-          if systemctl --user is-system-running >/dev/null 2>&1; then
-            ./tests/rehearsal/run.sh 2>&1 | tee /tmp/rehearsal.log || rc=$?
-          else
-            echo "::warning::no user systemd session on this runner; running only the non-systemd scenarios"
-            ./tests/rehearsal/run.sh corrupt_archive missing_checksum truncated_archive \
-              path_traversal not_a_suite_archive wrong_platform legacy_layout 2>&1 \
-              | tee /tmp/rehearsal.log || rc=$?
-          fi
-          if [ "$rc" != "0" ]; then
-            # Surface the reason on the run itself; job logs need admin rights.
-            echo "::error title=Rehearsal output::$(tail -c 3000 /tmp/rehearsal.log | sed ':a;N;$!ba;s/\n/%0A/g')"
-            exit "$rc"
-          fi
 
       - name: Publish the release
         uses: softprops/action-gh-release@v2
@@ -299,11 +249,8 @@ jobs:
 
             `sha256: ${{ steps.assemble.outputs.sha256 }}`
 
-            The build is reproducible: this workflow assembled the archive twice
-            and confirmed both had this checksum.
-
       - name: Upload build diagnostics
-        if: always()
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: build-diagnostics
