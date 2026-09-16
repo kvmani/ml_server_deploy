@@ -14,7 +14,7 @@
 # production release.
 
 schema: ml-suite.manifest.v1
-suite_version: 1.13.0
+suite_version: 1.14.0
 
 platform:
   os_id: ubuntu
@@ -618,7 +618,14 @@ services:
     # JSON metadata; the previous mask download is unchanged. No new dependencies and no
     # persistent state. Its version files still read 1.0.0 (the bump is uncommitted in that
     # repository); the resolved commit in the released manifest is the exact identity.
-    ref: v1.1.0
+    #
+    # v1.1.1 (suite 1.14.0), tagged with the owner's authorisation: images segmented on a
+    # downscaled copy (long side > max_long_side_px, 2048) now return the mask, overlay and
+    # measurements at the uploaded size (nearest-neighbour mask restoration, labels exact;
+    # measurements in original pixels), and the upload limit default rises from 5 MB to
+    # 10 MB. Version files now read 1.1.1. No new dependencies, no persistent state, so
+    # rolling back to suite 1.13.0 needs nothing restored.
+    ref: v1.1.1
     commit: ""
     # Flat package at the repository root, not a src/ layout like the others.
     dir: HydrideSegmentation
