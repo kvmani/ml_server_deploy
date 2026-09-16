@@ -14,7 +14,7 @@
 # production release.
 
 schema: ml-suite.manifest.v1
-suite_version: 1.12.0
+suite_version: 1.13.0
 
 platform:
   os_id: ubuntu
@@ -544,8 +544,13 @@ services:
     # start it backs up its database and upgrades it to schema 4 (additive columns
     # images/versions.mask_import_details); annotator 2.0.x refuses a schema-4 database,
     # so rolling back past 1.12.0 needs that copy restored -- see "Rollback" in RUNBOOK.md.
+    #
+    # Annotator 2.2.0 (suite 1.13.0): a Polygon threshold tool (Otsu inside a clicked
+    # outline), number boxes for brush/eraser diameter, wand tolerance and threshold, and
+    # [ ] changing the current tool's value. Browser-only change: schema stays 4, no new
+    # dependencies, so rolling back to 1.12.0 needs nothing restored.
     repo: kvmani/OnlineAnnotator
-    ref: v2.1.0
+    ref: v2.2.0
     commit: ""
     dir: OnlineAnnotator
     import_check: online_annotator
