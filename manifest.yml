@@ -14,7 +14,7 @@
 # production release.
 
 schema: ml-suite.manifest.v1
-suite_version: 1.14.0
+suite_version: 1.15.0
 
 platform:
   os_id: ubuntu
@@ -707,6 +707,10 @@ verify:
 # workflow writes the fully resolved list to requirements/mirror_audit.txt; this
 # section only records the non-obvious ones worth checking with IT in advance.
 mirror_notes:
+  - "threadpoolctl is capped at 3.6.0 by requirements/constraints.txt, because the
+     office mirror carries nothing newer. Suite v1.12.0 resolved 3.7.0 and failed
+     to install. The dependency gate refuses any release that pins past a cap in
+     that file; raise a cap only once IT confirms the newer version is mirrored."
   - "torch and torchvision must come from a CPU-only index; the default wheels
      bundle the CUDA runtime and add several GB for no benefit on this host."
   - "poppler-utils (apt) provides pdftoppm, required by pdf2image for previews."

@@ -1,0 +1,13 @@
+# Hard caps imposed by the office pip mirror.
+#
+# tools/dependency_gate.py resolves the shared environment with `-c` on this
+# file, then refuses the release if resolved.txt pins any package listed here at
+# a different version. A pin belongs here when the newest release on PyPI is not
+# available on the air-gapped office mirror, so an unconstrained resolve would
+# produce an archive that cannot be installed on the server.
+#
+# Remove or raise a pin only once IT confirms the newer version is on the mirror.
+
+# Suite v1.12.0 resolved 3.7.0 and failed to install: the mirror stops at 3.6.0,
+# which production already ran successfully with scikit-learn.
+threadpoolctl==3.6.0

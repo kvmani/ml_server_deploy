@@ -909,6 +909,12 @@ lists everything the mirror must carry."
         fi
     else
         warn "no requirements/resolved.txt in the release; falling back to per-component requirements"
+        # Unpinned requirements would otherwise take the newest version on the
+        # index, which may be one the office mirror does not carry.
+        CONSTRAINT_ARGS=()
+        if [[ -f "${TARGET_RELEASE}/requirements/constraints.txt" ]]; then
+            CONSTRAINT_ARGS=(-c "${TARGET_RELEASE}/requirements/constraints.txt")
+        fi
         while read -r id; do
             app_dir="$(svc "$id" dir "$id")"
             while read -r req; do
@@ -917,7 +923,7 @@ lists everything the mirror must carry."
                 [[ -f "$req_path" ]] || { warn "  ${id}: ${req} not found, skipping"; continue; }
                 log "  ${id}: pip install -r ${req}"
                 "${ML_VENV}/bin/python" -m pip install --disable-pip-version-check \
-                    "${PIP_INDEX_ARGS[@]}" -r "$req_path" \
+                    "${PIP_INDEX_ARGS[@]}" "${CONSTRAINT_ARGS[@]}" -r "$req_path" \
                     || fail_and_rollback "dependency installation failed for ${id}"
             done < <(mf "services.${id}.requirements" 2>/dev/null || true)
         done < <(service_ids)
