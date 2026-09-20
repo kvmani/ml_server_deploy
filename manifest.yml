@@ -14,7 +14,7 @@
 # production release.
 
 schema: ml-suite.manifest.v1
-suite_version: 1.15.0
+suite_version: 1.16.0
 
 platform:
   os_id: ubuntu
@@ -625,7 +625,18 @@ services:
     # measurements in original pixels), and the upload limit default rises from 5 MB to
     # 10 MB. Version files now read 1.1.1. No new dependencies, no persistent state, so
     # rolling back to suite 1.13.0 needs nothing restored.
-    ref: v1.1.1
+    #
+    # v1.2.0 (suite 1.16.0), tagged with the owner's authorisation: the segmentation page
+    # can rotate a micrograph before it is segmented. Fn reads the horizontal image axis as
+    # circumferential and the vertical as radial, so a micrograph captured in another frame
+    # was measured against the wrong axes -- on the packaged sample, length-weighted Fn
+    # reads 0.026 upright and 0.983 after a quarter turn. The rotation is optional, defaults
+    # to none, and travels per request as the rotation_deg form field, so an unrotated run
+    # gives exactly the 1.1.1 result. Also: a chosen image now previews immediately, with
+    # TIFF rendered server-side through a new POST /api/preview that keeps nothing. No new
+    # dependencies and no persistent state -- the angle is never stored -- so rolling back
+    # to suite 1.15.0 needs nothing restored.
+    ref: v1.2.0
     commit: ""
     # Flat package at the repository root, not a src/ layout like the others.
     dir: HydrideSegmentation
