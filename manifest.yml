@@ -14,7 +14,7 @@
 # production release.
 
 schema: ml-suite.manifest.v1
-suite_version: 1.16.0
+suite_version: 1.17.0
 
 platform:
   os_id: ubuntu
@@ -358,7 +358,31 @@ services:
 
   pytex:
     repo: kvmani/pytex
-    ref: v0.10.0
+    # v0.12.0 (suite 1.17.0), from v0.10.0; v0.11.0 was never tagged, so both
+    # releases arrive together. What users on this server will notice:
+    #
+    # - FIB lamella planning (EBSD -> FIB lamella): from an EBSD scan and a
+    #   target TEM zone axis, which grain to cut, where in it, at what azimuth
+    #   in the sample frame, the SEM image and the FIB pattern box, and what
+    #   residual tilt the TEM holder must supply -- with the unknown mounting
+    #   rotation on the grid treated as unknown, an uncertainty budget, figures,
+    #   and a printable one-page work order for the FIB operator. The FIB
+    #   rotation stays marked UNCALIBRATED until the fiducial protocol in the
+    #   docs has been run on the instrument.
+    # - Residual stress by the sin^2(psi) method in the XRD workspace, with
+    #   click-to-exclude outliers and a printable report; any X-ray wavelength,
+    #   including synchrotron beams, in every XRD view.
+    # - A printable HTML report on every result.
+    # - (0.11.0) a full multislice HRTEM engine as the default, focal and
+    #   thickness series, and full-resolution PNG/TIFF downloads of every
+    #   computed image.
+    #
+    # Dependencies: pillow is now declared, but matplotlib already required it,
+    # so nothing new reaches the office mirror. No persistent state or
+    # environment-file change; rolling back to suite 1.16.0 needs nothing
+    # restored. The documentation is rebuilt on the server for the new commit
+    # (docs_build below), which takes tens of minutes and never blocks.
+    ref: v0.12.0
     commit: ""
     dir: pytex
     import_check: pytex
