@@ -14,7 +14,7 @@
 # production release.
 
 schema: ml-suite.manifest.v1
-suite_version: 1.17.0
+suite_version: 1.18.0
 
 platform:
   os_id: ubuntu
@@ -660,7 +660,17 @@ services:
     # TIFF rendered server-side through a new POST /api/preview that keeps nothing. No new
     # dependencies and no persistent state -- the angle is never stored -- so rolling back
     # to suite 1.15.0 needs nothing restored.
-    ref: v1.2.0
+    #
+    # v2.0.0 (suite 1.18.0): the Hydride Connectivity Index (HCI v1), a new section 5
+    # "Connectivity (HCI)" on the segmentation page, ticked by default. It reports whether
+    # hydrides link into continuous paths -- radial, circumferential and isotropic HCI, the
+    # critical linking distance delta_half, path continuity and skeleton topology -- with an
+    # HCI page in the PDF report and a Connectivity sheet in the XLSX export. The library is
+    # src/microseg/evaluation/continuity, imported as src.microseg like the rest of the web
+    # app, so the PYTHONPATH below already covers it. It uses only numpy, scipy,
+    # scikit-image, matplotlib and pillow, all already required; requirements-*.txt are
+    # unchanged. No persistent state, so rolling back to suite 1.17.0 needs nothing restored.
+    ref: v2.0.0
     commit: ""
     # Flat package at the repository root, not a src/ layout like the others.
     dir: HydrideSegmentation
