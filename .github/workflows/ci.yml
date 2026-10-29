@@ -5,9 +5,10 @@ name: CI
 # deploy/ or tests/rehearsal/ change (README, "The rehearsal"); the release workflow gates what the
 # air-gapped install depends on.
 
+# Manual only, by the maintainer's decision (2026-10-29): no push starts this
+# workflow. Run it from the Actions tab ("Run workflow"). release.yml still runs
+# on a pushed v* tag, because pushing the tag is itself the act of releasing.
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 concurrency:
