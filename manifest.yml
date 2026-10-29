@@ -14,7 +14,7 @@
 # production release.
 
 schema: ml-suite.manifest.v1
-suite_version: 1.18.0
+suite_version: 1.19.0
 
 platform:
   os_id: ubuntu
@@ -281,11 +281,15 @@ services:
 
   gateway:
     repo: kvmani/ml_server
-    # 1.3.1 fixes the admin sign-in failure seen from suite v1.4.0 to v1.6.0
+    # 1.4.0 (suite 1.19.0): the PyTex tile is found by searching for "variant",
+    # "variant identification", "orientation relationship", "Burgers" or
+    # "Kurdjumov-Sachs", and the PyTex help page gains the variant-misfit
+    # equation. No behaviour, configuration or dependency change.
+    # 1.3.1 fixed the admin sign-in failure seen from suite v1.4.0 to v1.6.0
     # (a Secure session cookie on a plain-HTTP site, and a signing key that
-    # differed between the two gunicorn workers) and adds the versioned config
+    # differed between the two gunicorn workers) and added the versioned config
     # schema that update.sh validates and migrates shared/config against.
-    ref: v1.3.1
+    ref: v1.4.0
     commit: ""
     dir: ml_server
     import_check: ml_server
@@ -358,31 +362,29 @@ services:
 
   pytex:
     repo: kvmani/pytex
-    # v0.12.0 (suite 1.17.0), from v0.10.0; v0.11.0 was never tagged, so both
-    # releases arrive together. What users on this server will notice:
+    # v0.13.0 (suite 1.19.0), from v0.12.0. What users on this server will
+    # notice:
     #
-    # - FIB lamella planning (EBSD -> FIB lamella): from an EBSD scan and a
-    #   target TEM zone axis, which grain to cut, where in it, at what azimuth
-    #   in the sample frame, the SEM image and the FIB pattern box, and what
-    #   residual tilt the TEM holder must supply -- with the unknown mounting
-    #   rotation on the grid treated as unknown, an uncertainty budget, figures,
-    #   and a printable one-page work order for the FIB operator. The FIB
-    #   rotation stays marked UNCALIBRATED until the fiducial protocol in the
-    #   docs has been run on the instrument.
-    # - Residual stress by the sin^2(psi) method in the XRD workspace, with
-    #   click-to-exclude outliers and a printable report; any X-ray wavelength,
-    #   including synchrotron beams, in every XRD view.
-    # - A printable HTML report on every result.
-    # - (0.11.0) a full multislice HRTEM engine as the default, focal and
-    #   thickness series, and full-resolution PNG/TIFF downloads of every
-    #   computed image.
+    # - Variants -> "Identify the variant of a measured child grain": enter the
+    #   Euler angles of a parent grain and a neighbouring product grain (from
+    #   EBSD) and the orientation relationship (Burgers, Kurdjumov-Sachs,
+    #   Nishiyama-Wassermann, ... or one stated by hand). The result names the
+    #   variant and shows the derivation in nine numbered steps, every
+    #   equation typeset with the measured values substituted: both
+    #   orientation matrices, the relationship's rotation, the measured
+    #   rotation, every variant with its generating symmetry operator, the
+    #   misfit of each, the matching parent and child operators written out as
+    #   matrices, the parallel plane and direction checked on the two grains,
+    #   and an assigned / ambiguous / no-fit verdict.
+    # - Typeset equations render offline in the browser (native MathML, no
+    #   download) and in the printable HTML and Markdown reports.
     #
-    # Dependencies: pillow is now declared, but matplotlib already required it,
-    # so nothing new reaches the office mirror. No persistent state or
-    # environment-file change; rolling back to suite 1.16.0 needs nothing
-    # restored. The documentation is rebuilt on the server for the new commit
-    # (docs_build below), which takes tens of minutes and never blocks.
-    ref: v0.12.0
+    # No new dependency, so nothing new reaches the office mirror. No
+    # persistent state or environment-file change; rolling back to suite
+    # 1.18.0 needs nothing restored. The documentation is rebuilt on the
+    # server for the new commit (docs_build below), which takes tens of
+    # minutes and never blocks.
+    ref: v0.13.0
     commit: ""
     dir: pytex
     import_check: pytex
