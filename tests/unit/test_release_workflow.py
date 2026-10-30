@@ -16,7 +16,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 
-from component_updates import newest_tag, pinned_commit  # noqa: E402
+from component_updates import newest_tag, pinned_commit
 
 
 def _workflow(path: Path) -> dict:
@@ -80,7 +80,7 @@ def test_no_workflow_runs_on_a_schedule_or_a_branch_push() -> None:
     for path in [*(ROOT / ".github" / "workflows").glob("*.yml"), ROOT / "tools" / "templates" / "component-release.yml"]:
         triggers = _triggers(_workflow(path))
         assert not set(triggers) & {"schedule", "pull_request", "pull_request_target"}, path.name
-        assert set((triggers.get("push") or {})) <= {"tags"}, path.name
+        assert set(triggers.get("push") or {}) <= {"tags"}, path.name
 
 
 def test_newest_tag_orders_versions_numerically_and_ignores_other_tags() -> None:

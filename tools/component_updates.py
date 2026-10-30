@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from manifest import load  # noqa: E402
+from manifest import load
 
 VERSION_TAG = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 
@@ -95,8 +95,7 @@ def survey(document: dict[str, Any]) -> list[dict[str, Any]]:
             {
                 "pinned_commit": pin,
                 "newest_tag": latest,
-                "newer_tag": bool(latest and latest != ref and VERSION_TAG.match(ref) and
-                                  _key(latest) > _key(ref)),
+                "newer_tag": bool(latest and _key(latest) > _key(ref)),
                 "default_branch_commit": head,
                 "unreleased_commits": bool(head and latest and head != refs.get(f"refs/tags/{latest}")),
                 "default_branch_moved": bool(head and pin and head != pin),
@@ -132,7 +131,7 @@ def main(argv: list[str] | None = None) -> int:
                 if row["unreleased_commits"]:
                     notes.append("default branch has commits after the newest tag (release the component first)")
                 state = "; ".join(notes) or "up to date"
-            print(f"{row['service']:<12} {row['pinned']:<10} {str(row.get('newest_tag')):<11} {state}")
+            print(f"{row['service']:<12} {row['pinned']:<10} {row.get('newest_tag')!s:<11} {state}")
     if any("error" in row for row in rows):
         return 2
     if any(row.get("newer_tag") or row.get("unreleased_commits") for row in rows):
