@@ -279,6 +279,43 @@ else
     say "  (no deployment history yet)"
 fi
 
+# Backups (deploy/backup.py). Read-only: the last run's record and the timer.
+say ""
+say "  Backups"
+say "  ---------------------------------------------------------------"
+BACKUP_CONFIG="${ML_ROOT}/shared/config/backup.toml"
+BACKUP_LAST="${ML_ROOT}/shared/state/backup-last.json"
+if [[ ! -f "$BACKUP_CONFIG" ]]; then
+    say "  not configured  (see RUNBOOK.md, \"Backups\")"
+else
+    if [[ "$ML_SYSTEMD_SCOPE" == "user" ]] && systemctl --user is-enabled ml-backup.timer >/dev/null 2>&1; then
+        next_run="$(systemctl --user show ml-backup.timer -p NextElapseUSecRealtime --value 2>/dev/null || true)"
+        say "  timer           enabled, next run ${next_run:-unknown}"
+    else
+        say "  timer           NOT INSTALLED  (backup.sh install-timer)"
+    fi
+    if [[ -f "$BACKUP_LAST" ]]; then
+        python3 - "$BACKUP_LAST" <<'PYEOF'
+import json
+import sys
+
+record = json.load(open(sys.argv[1], encoding="utf-8"))
+print(f"  last run        {record.get('started_local', '?')}  {str(record.get('outcome', '?')).upper()}")
+for destination in record.get("destinations", []):
+    line = f"    {destination.get('name', '?'):<10} {destination.get('outcome', '?'):<10}"
+    if destination.get("outcome") == "failed":
+        line += f" {destination.get('reason')}: {destination.get('hint')}"
+    else:
+        line += f" {len(destination.get('kept', []))} kept"
+    print(line)
+for error in record.get("errors", []):
+    print(f"    error      {error.get('reason')}: {error.get('hint')}")
+PYEOF
+    else
+        say "  last run        none yet"
+    fi
+fi
+
 if (( ! NO_HEALTH )); then
     say ""
     "${SCRIPT_DIR}/health_check.sh" --root "$ML_ROOT" --systemd-scope "$ML_SYSTEMD_SCOPE" || true

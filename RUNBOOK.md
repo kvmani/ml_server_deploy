@@ -745,6 +745,241 @@ extra, in which case the log names the packages to ask IT for.
 
 ---
 
+## Backups (new in suite 1.20.0)
+
+Every night the suite is copied, checked and stored in two places: a folder on
+this machine and a network share. Each place keeps the last 10 *different*
+backups. A night on which nothing changed stores nothing, so ten backups are
+ten distinct states, not the last ten days of the same one.
+
+What is in a backup: everything under `~/ml_platform` (databases, uploads,
+models, configuration, logs, deployment history, pre-update checkpoints) plus
+the release that is running, plus the systemd unit files and `/etc/pip.conf`.
+What is left out: `.venv` (rebuilt from the mirror; torch by hand),
+`shared/tmp`, `shared/docs` (rebuilt), `deployment_inbox` and older releases.
+Share passwords are never in a backup.
+
+How a backup is made safe to rely on:
+
+- Databases are copied with SQLite's own backup method while the services keep
+  running, then checked with `PRAGMA integrity_check`. A plain file copy of a
+  database in use can be silently torn; this cannot.
+- Every file's SHA-256 is recorded in a manifest inside the archive and beside
+  it (`<archive>.json`), with the archive's own checksum in `<archive>.sha256`.
+- The archive is verified after it is built, and again after it is stored. On
+  the network share it is uploaded under a temporary `.partial` name, read back
+  and compared, and only then renamed. A half-written backup never looks
+  complete.
+- Old backups are deleted only after the new one is stored and verified, and
+  only at the destination that succeeded. A failing share never loses its old
+  copies.
+- Only this machine's backups (named `mlplatform-<hostname>-...`) are ever
+  counted or deleted. Anything else in the folder is left alone.
+
+### Setting it up (once)
+
+Everything runs as `kvmani`, no `sudo`, with the system `python3`.
+
+```bash
+cd ~/ml_platform/current/deploy
+./backup.sh init-config
+nano ~/ml_platform/shared/config/backup.toml
+```
+
+`init-config` writes `shared/config/backup.toml` from the commented template.
+It is persistent state: upgrades and rollbacks never overwrite it. Set at
+least the network destination. There are two forms; keep one, delete the other:
+
+- **`type = "smb"`**: a Windows/Samba share reached directly with `smbclient`.
+  No mount and no root needed. Set `share = "//server/share"` (the `\\server\share`
+  path with forward slashes) and `remote_dir` (a folder inside it, created if
+  missing). Needs the `smbclient` package.
+- **`type = "path"`**: a share that IT has already mounted (in `/etc/fstab`).
+  Set `path` to a folder on it and `require_mountpoint` to the mount point.
+  Nothing is written unless that mount point is really mounted, so an unmounted
+  share can never quietly fill the local disk instead.
+
+If you are not sure which you have, `mount | grep -Ei 'cifs|smb|nfs'` lists the
+network shares that are mounted now, and `grep -Ei 'cifs|nfs' /etc/fstab` the
+ones that are mounted at boot.
+
+Store the share's user name and password (for `type = "smb"`):
+
+```bash
+./backup.sh set-credentials network
+```
+
+It asks for the user name, the domain (leave empty if none) and the password
+twice, stores them in `~/.config/ml_platform_backup/credentials/network.cred`
+(mode 600, readable only by you, never in git, never in a backup), and then
+tries the share at once and says whether it accepted them.
+
+Then check, take one backup by hand, and schedule it:
+
+```bash
+./backup.sh test-destinations   # does every destination answer, and what it holds
+./backup.sh run                 # the first one takes longest
+./backup.sh status
+./backup.sh install-timer       # every night at `schedule` (00:00 by default)
+systemctl --user list-timers ml-backup.timer
+```
+
+The timer is a systemd user timer, like the services, so it needs the same
+`loginctl enable-linger kvmani` they do. It is `Persistent`: if the server was
+off at midnight, the backup runs as soon as it is back up. It runs at low CPU
+and disk priority so a late user does not notice it.
+
+### Checking on it
+
+```bash
+cd ~/ml_platform/current/deploy
+./status.sh                # has a "Backups" section: timer, last run, each destination
+./backup.sh status         # the last run in detail, and how old each stored password is
+./backup.sh list           # every backup held at every destination
+```
+
+Records, all under `~/ml_platform/shared/`:
+
+| File | What it holds |
+|------|---------------|
+| `logs/backup/backup-<time>.log` | one readable log per run, every step with timestamps |
+| `state/backup-last.json` | the last run as JSON: outcome, archive, sizes, checksums, per-destination result |
+| `state/backup-history.jsonl` | one JSON line per run, ever (schema `ml-platform.backup-run/1`) |
+
+`journalctl --user -u ml-backup` shows what the timer itself started.
+
+A run ends in one of three states. `ok`: stored and verified everywhere (or
+nothing changed since the last backup). `partial`: at least one destination
+has the new backup, and at least one failed; the failure and what to do about it
+are named. `failed`: no destination has it. Each failure carries a reason and a
+one-line fix, for example:
+
+```
+network: credentials_expired: the share says the password has expired
+  -> change the password, then: backup.sh set-credentials network
+```
+
+### When the share's password changes
+
+Passwords that expire are the expected failure, and the backup treats them as
+such. The local copy is still made that night, the run is recorded as
+`partial` with reason `credentials_rejected` or `credentials_expired`, and the
+share's existing backups are left untouched. To fix it:
+
+```bash
+cd ~/ml_platform/current/deploy
+./backup.sh set-credentials network     # stores the new password and tests it
+```
+
+Nothing else is needed. The next run notices the share is behind and copies
+the newest backup to it, even if nothing changed in between. Running
+`./backup.sh run` at once does the same. `./backup.sh status` shows how many
+days ago each password was stored, which helps if passwords expire on a fixed
+cycle.
+
+Other reasons you may see: `account_locked` (too many bad attempts; IT must
+unlock it), `permission_denied` (the account cannot write that folder),
+`share_not_found` (check `share`), `unreachable` (server off or network down),
+`disk_full`, `not_mounted` (for `type = "path"`), `smbclient_missing`.
+
+### Changing what, where, how many, or when
+
+Edit `~/ml_platform/shared/config/backup.toml`, then `./backup.sh
+test-destinations`. `keep`, `exclude` and destinations take effect at the next
+run. A new `schedule` needs `./backup.sh install-timer` again.
+`./backup.sh remove-timer` stops the nightly runs; `enabled = false` in the file
+makes every run log that it is disabled and do nothing else.
+
+---
+
+## Restoring from a backup
+
+First pick the backup and check it. A backup in the local folder:
+
+```bash
+cd ~/ml_platform/current/deploy
+./backup.sh list
+./backup.sh verify ~/ml_platform_backups/mlplatform-<host>-<time>-suite<ver>.tar.gz
+```
+
+`verify` checks the archive's checksum, then every file inside it against the
+manifest made when it was built. A backup on the
+share is fetched first (it asks for the share password if you use `-U`; on this
+machine `-A` reuses the stored one):
+
+```bash
+mkdir -p ~/restore_download && cd ~/restore_download
+smbclient //server/share -A ~/.config/ml_platform_backup/credentials/network.cred \
+  -D ml_platform/<host> \
+  -c 'get mlplatform-<host>-<time>-suite<ver>.tar.gz; get mlplatform-<host>-<time>-suite<ver>.tar.gz.sha256'
+sha256sum -c mlplatform-<host>-<time>-suite<ver>.tar.gz.sha256
+```
+
+Unpack it into an empty folder (it is verified again first; nothing is
+overwritten):
+
+```bash
+~/ml_platform/current/deploy/backup.sh extract <archive> --to ~/restore
+ls ~/restore      # shared/  releases/  current  backups/  _meta/  _extra/
+```
+
+`_meta/` describes the machine the backup came from: `system.json` (host, OS,
+Python, time zone), `suite-status.json` (suite version and every component's
+commit), `pip-freeze.txt` (the exact packages in `.venv`), `crontab.txt` and
+`systemd-user-units.txt`.
+
+If `backup.sh` itself is gone, any copy of it will do (every suite archive in
+`deployment_inbox` has one in `deploy/`), or check and unpack by hand:
+`sha256sum -c <archive>.sha256 && mkdir ~/restore && tar -xzf <archive> -C ~/restore`.
+
+### One file or one database
+
+The usual case: a deleted upload, a bad edit, a damaged database.
+
+```bash
+systemctl --user stop ml-platform-<service>       # the one that owns the file
+cp -a ~/ml_platform/shared/data/<file> ~/ml_platform/shared/data/<file>.before-restore
+cp -a ~/restore/shared/data/<file> ~/ml_platform/shared/data/<file>
+systemctl --user start ml-platform-<service>
+~/ml_platform/current/deploy/health_check.sh
+```
+
+A database restored this way is the consistent copy taken at backup time. Do
+not copy any `-wal` or `-shm` file beside it; the backup has none on purpose.
+
+### Everything, on this machine or a new one
+
+The code comes back from the suite archive, the data from the backup.
+
+1. Set the machine up as in **First-time setup on a new machine**, with the
+   same suite version the backup was taken under (`suite<ver>` in its name):
+   `loginctl enable-linger kvmani`, install torch and torchvision into
+   `~/ml_platform/.venv` by hand, then `./update.sh ml-server-suite-v<ver>.tar.gz`.
+   This rebuilds `.venv`, the release and the unit files.
+2. Put the data back over the fresh install:
+
+   ```bash
+   systemctl --user stop 'ml-platform-*'
+   mv ~/ml_platform/shared ~/ml_platform/shared.fresh
+   cp -a ~/restore/shared ~/ml_platform/shared
+   cp -a ~/restore/backups/. ~/ml_platform/backups/ 2>/dev/null || true
+   systemctl --user start 'ml-platform-*'
+   cd ~/ml_platform/current/deploy && ./health_check.sh && ./status.sh
+   ```
+
+3. Store the share password again (`./backup.sh set-credentials network`; it
+   was never in the backup), then `./backup.sh test-destinations` and
+   `./backup.sh install-timer`.
+
+If the suite archive for that version is nowhere to be found, the backup holds
+the running release itself under `releases/<ver>/`, and `_meta/pip-freeze.txt`
+lists the exact packages `.venv` had.
+
+A machine with a different host name starts its own series of backups and
+never deletes the old machine's, even in the same folder.
+
+---
+
 ## Where everything lives
 
 ```
@@ -758,11 +993,18 @@ extra, in which case the log names the packages to ask IT for.
 │   ├── config/                   ml-platform.env, config.intranet.json
 │   │                             + .session_secret_key (generated, secret)
 │   │                             + config.intranet.json.bak-* (pre-migration)
+│   │                             + backup.toml (what, where, when to back up)
 │   ├── logs/                     deployment and application logs
+│   │   └── backup/               one log per nightly backup
 │   └── state/history.jsonl       every deployment ever made here
+│       state/backup-*.json(l)    the last backup, and every backup ever
 ├── backups/                      pre-update checkpoints (database, units, freeze)
 ├── .venv/                        the shared Python environment
 └── deployment_inbox/             where to put transferred archives
+
+~/ml_platform_backups/            nightly backups, destination "local"
+~/ml_platform_backup_staging/     where a backup is built; empty between runs
+~/.config/ml_platform_backup/     share credentials (mode 600; never backed up)
 ```
 
 Unit files are in `~/.config/systemd/user/ml-platform-*.service`. They are

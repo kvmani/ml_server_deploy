@@ -1,0 +1,102 @@
+# ML Server suite backups -- configuration.
+#
+# Live copy: ~/ml_platform/shared/config/backup.toml (created by
+# `backup.sh init-config`). It is persistent state: no upgrade or rollback
+# overwrites it, and it is itself included in every backup.
+#
+# After editing, check with:   ~/ml_platform/current/deploy/backup.sh test-destinations
+# Then try one by hand:        ~/ml_platform/current/deploy/backup.sh run
+# Then schedule it:            ~/ml_platform/current/deploy/backup.sh install-timer
+#
+# Passwords never go in this file. See the network destination below.
+
+[backup]
+enabled = true
+
+# What is backed up: this folder, minus `exclude`.
+source_root = "~/ml_platform"
+
+# How many unique backups each destination keeps. A night on which nothing
+# changed stores nothing, so these are always 10 *different* states.
+keep = 10
+
+# When the timer runs (systemd calendar syntax, server local time).
+# Changing it needs `backup.sh install-timer` again.
+schedule = "*-*-* 00:00:00"
+
+# Where the archive is built before it is copied out. Needs free space of about
+# the size of one backup. Same disk is fine; it is emptied after every run.
+staging_dir = "~/ml_platform_backup_staging"
+
+# Paths relative to source_root, shell-style patterns, never backed up.
+#   .venv            rebuilt from the package mirror (torch is installed by hand)
+#   shared/tmp       scratch space
+#   shared/docs      the PyTex /docs site, rebuilt by deploy/build_docs.sh
+#   deployment_inbox transferred suite archives (you keep those anyway)
+#   releases/*       older releases; the running one is still included, below
+exclude = [
+  ".venv",
+  "shared/tmp",
+  "shared/docs",
+  "deployment_inbox",
+  "releases/*",
+]
+
+# Include the release that is running now (the code), even though releases/*
+# is excluded above.
+include_current_release = true
+
+# Files from outside source_root that a rebuild on a new machine needs. Stored
+# in the archive under _extra/<full path>.
+include_extra = [
+  "~/.config/systemd/user",
+  "/etc/pip.conf",
+]
+
+# gzip level, 1 (fast) to 9 (small). 6 is the usual balance.
+compress_level = 6
+
+# Per-run log files kept in shared/logs/backup/.
+log_keep_runs = 90
+
+
+# --- Destination 1: another folder on this machine --------------------------
+# Not protection against a dead disk, but it is protection against a deleted
+# file, a bad upgrade or a corrupted database -- the common disasters.
+[[destination]]
+name = "local"
+type = "path"
+path = "~/ml_platform_backups"
+
+
+# --- Destination 2: the network drive ----------------------------------------
+# Choose ONE of the two forms below and delete the other.
+#
+# (a) The share is already mounted on this server (for example by IT, through
+#     /etc/fstab). Name the mount point: nothing is written unless it is really
+#     mounted, so an unmounted share can never quietly fill the local disk.
+#     If this user may mount it (a "user" fstab entry), mount_command lets the
+#     backup mount it when it finds it unmounted.
+#
+# [[destination]]
+# name = "network"
+# type = "path"
+# path = "/mnt/backupshare/ml_platform/meghvm"
+# require_mountpoint = "/mnt/backupshare"
+# mount_command = ""            # e.g. "mount /mnt/backupshare"
+# timeout_seconds = 30          # a share that does not answer in this long is reported, not waited on
+#
+# (b) A Windows/SMB share reached directly with smbclient -- no mount, no root.
+#     Store (and later change) the user name and password with:
+#         backup.sh set-credentials network
+#     They are kept in ~/.config/ml_platform_backup/credentials/network.cred,
+#     readable only by you and never included in a backup.
+#
+[[destination]]
+name = "network"
+type = "smb"
+share = "//FILESERVER/SHARE"      # <-- replace: \\server\share written with forward slashes
+remote_dir = "ml_platform/meghvm" # folder inside the share; created if missing
+credentials = "network"           # which stored credentials to use
+verify_after_upload = true        # read the upload back and compare checksums
+timeout_seconds = 30

@@ -14,7 +14,7 @@
 # production release.
 
 schema: ml-suite.manifest.v1
-suite_version: 1.19.0
+suite_version: 1.20.0
 
 platform:
   os_id: ubuntu
@@ -232,22 +232,20 @@ system_requirements:
       Detecting whether a service port is already in use, which is how a clash
       with another application is caught before anything is deployed.
 
-# Extra package indexes needed to install the pinned set.
+# Extra package indexes, used in addition to the mirror named in /etc/pip.conf.
 #
-# torch resolves to a local version such as `2.13.0+cpu`, and that wheel exists
-# only on a PyTorch CPU index -- never on PyPI. Installing resolved.txt without
-# this fails on torch alone, which is precisely what happened the first time the
-# real archive was installed.
+# Empty on purpose. The office server is air-gapped: its pip.conf mirror is the
+# only index it can reach, and torch (a local version such as `2.13.0+cpu`) is
+# installed there by hand and listed under `preinstalled` below, so nothing
+# needs another index. Before suite 1.20.0 this listed download.pytorch.org,
+# which an air-gapped server can never reach; pip spent every update retrying it.
 #
-# The office server should point this at its own internal mirror. Override it
-# without editing the manifest, either way:
-#   ML_PIP_EXTRA_INDEX_URL=http://pytorch-cpu.intranet.local/whl/cpu ./update.sh ...
-#   ./update.sh <archive> --extra-index-url http://pytorch-cpu.intranet.local/whl/cpu
-# Set ML_PIP_EXTRA_INDEX_URL to the empty string to use only the configured
-# mirror in /etc/pip.conf.
+# A machine that does need one (a networked test box, say) can add it without
+# editing the manifest, either way:
+#   ML_PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cpu ./update.sh ...
+#   ./update.sh <archive> --extra-index-url https://download.pytorch.org/whl/cpu
 pip:
-  extra_index_urls:
-    - https://download.pytorch.org/whl/cpu
+  extra_index_urls: []
 
   # Packages that are already installed in the office environment, by hand and
   # offline, and that update.sh must therefore never install, upgrade or touch.
