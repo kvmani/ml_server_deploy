@@ -1,8 +1,23 @@
 name: Build suite release
 
-# Tagging the deployment repository is the only action a routine release needs.
 # Everything below runs on the Internet side; the office server never talks to
 # GitHub and only ever sees the two files attached to the Release.
+#
+# Two ways to start it, both deliberate (see RELEASING.md):
+#
+#   1. "Run workflow" on main with publish = true (Actions tab,
+#      `gh workflow run release.yml -f publish=true`, or an agent's GitHub
+#      tool). It builds and checks the suite at that commit and, only if every
+#      gate passes, creates tag v<suite_version> on it and publishes the
+#      Release. This is how a cloud agent releases: it can start a workflow but
+#      cannot push a tag itself. With publish = false (the default) it is a
+#      rehearsal: the same build, the archive attached to the run, nothing
+#      tagged or published.
+#   2. Push a tag v<suite_version> (or create it with the browser's "Draft a new
+#      release"). The tag must match suite_version.
+#
+# A tag this workflow creates does not start it again: GitHub starts no
+# workflow for a push made with the workflow's own token.
 #
 # Lean by design: only the gates the air-gapped install depends on. Archive
 # reproducibility is covered by tests/unit (test_the_archive_is_reproducible),
@@ -14,12 +29,18 @@ on:
       - "v*"
   workflow_dispatch:
     inputs:
-      suite_version:
-        description: "Suite version to build (defaults to manifest.yml)"
+      publish:
+        description: "Tag v<suite_version> on this commit and publish the Release (off: build only, as a rehearsal)"
         required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
+
+concurrency:
+  group: suite-release
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -55,19 +76,49 @@ jobs:
       # has happened once already: a version bump was applied with sed, the
       # pattern silently matched nothing because someone else had already moved
       # the version, and the mismatch was not noticed until after publication.
-      - name: Tag must match suite_version
-        if: startsWith(github.ref, 'refs/tags/')
+      # A run started by hand takes its tag from suite_version, so the two
+      # cannot disagree; a pushed tag is checked against it.
+      - name: Decide the tag, and check it against suite_version
+        id: tag
         working-directory: deploy-repo
+        env:
+          PUBLISH: ${{ inputs.publish }}
         run: |
           set -euo pipefail
           suite="$(python -c "import yaml; print(yaml.safe_load(open('manifest.yml'))['suite_version'])")"
-          tag="${GITHUB_REF_NAME}"
-          if [ "$tag" != "v${suite}" ]; then
-            echo "::error::tag ${tag} does not match manifest suite_version ${suite} (expected v${suite})."
-            echo "::error::Bump suite_version in manifest.yml, or tag v${suite} instead."
-            exit 1
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME}"
+            if [ "$tag" != "v${suite}" ]; then
+              echo "::error::tag ${tag} does not match manifest suite_version ${suite} (expected v${suite})."
+              echo "::error::Bump suite_version in manifest.yml, or tag v${suite} instead."
+              exit 1
+            fi
+            publish=true
+            create=false
+          else
+            tag="v${suite}"
+            publish="${PUBLISH:-false}"
+            create="${publish}"
           fi
-          echo "tag ${tag} matches suite_version ${suite}"
+          # An existing tag is asked of the remote: the commit it names (the
+          # peeled ^{} line for an annotated tag, else the only line).
+          remote="$(git ls-remote --tags origin "refs/tags/${tag}" "refs/tags/${tag}^{}")"
+          if [ "${create}" = "true" ] && [ -n "${remote}" ]; then
+            existing="$(printf '%s\n' "${remote}" | sort -k2 -r | head -n 1 | cut -f1)"
+            if [ "${existing}" != "${GITHUB_SHA}" ]; then
+              echo "::error::${tag} already exists, on ${existing}, not on this commit (${GITHUB_SHA})."
+              echo "::error::Bump suite_version in manifest.yml for a new release."
+              exit 1
+            fi
+            echo "${tag} already exists on this commit; publishing it again."
+            create=false
+          fi
+          {
+            echo "tag=${tag}"
+            echo "publish=${publish}"
+            echo "create=${create}"
+          } >> "$GITHUB_OUTPUT"
+          echo "suite ${tag} from ${GITHUB_SHA}: publish=${publish}, create tag=${create}"
 
       - name: Check text hygiene (CRLF, BOM, shebangs, case collisions)
         working-directory: deploy-repo
@@ -228,19 +279,46 @@ jobs:
           echo "sha256=$sha" >> "$GITHUB_OUTPUT"
           ls -la dist/
 
+      - name: Keep the rehearsal archive with the run
+        if: steps.tag.outputs.publish != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: suite-archive-rehearsal
+          path: |
+            deploy-repo/dist/*.tar.gz
+            deploy-repo/dist/*.tar.gz.sha256
+          retention-days: 7
+
+      # Only now, with every gate passed, does the tag come into being: a
+      # failed build never leaves a tag behind that names an unbuildable commit.
+      - name: Create the tag
+        if: steps.tag.outputs.create == 'true'
+        working-directory: deploy-repo
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${TAG}" -m "ML Server suite ${TAG}" "${GITHUB_SHA}"
+          git push origin "refs/tags/${TAG}"
+
       - name: Publish the release
+        if: steps.tag.outputs.publish == 'true'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
           files: |
             deploy-repo/dist/*.tar.gz
             deploy-repo/dist/*.tar.gz.sha256
           body: |
-            ## ML Server suite ${{ github.ref_name }}
+            ## ML Server suite ${{ steps.tag.outputs.tag }}
 
             Download both files, transfer them to the office server together, then run:
 
             ```
-            ./update.sh ml-server-suite-${{ github.ref_name }}.tar.gz
+            ./update.sh ml-server-suite-${{ steps.tag.outputs.tag }}.tar.gz
             ```
 
             The archive contains complete application source for every component

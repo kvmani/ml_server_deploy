@@ -1,0 +1,156 @@
+name: Publish release
+
+# Publishes vX.Y.Z of this repository: a git tag plus a GitHub Release whose
+# notes are that version's section of CHANGELOG.md. Nothing starts it except a
+# deliberate act by a person, or by an agent the person asked to release:
+#
+#   1. "Run workflow" on main (Actions tab, `gh workflow run release.yml
+#      -f version=X.Y.Z`, or an agent's GitHub tool) with the version to
+#      release. The workflow checks the version literal and the changelog,
+#      then creates the tag on that exact commit and publishes the release.
+#      This is how a cloud agent releases: it can start a workflow, but it
+#      cannot push a tag itself.
+#   2. Push a tag vX.Y.Z, or create it with the browser's "Draft a new
+#      release". The same checks run; the existing tag is used.
+#
+# A tag created by this workflow does not start it a second time: GitHub does
+# not start workflows for pushes made with the workflow's own token.
+#
+# Copied from ml_server_deploy/tools/templates/component-release.yml. To use it
+# in another repository, change only PRODUCT and VERSION_FILE below.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, e.g. 1.5.0. Must equal the version in the code. Leave empty when running on a tag."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  PRODUCT: "__PRODUCT__"
+  VERSION_FILE: "__VERSION_FILE__"
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Decide the tag, and check it against the version literal
+        id: tag
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          literal="$(python - <<'PY'
+          import os
+          import pathlib
+          import re
+          import sys
+
+          path = pathlib.Path(os.environ["VERSION_FILE"])
+          text = path.read_text(encoding="utf-8")
+          match = re.search(r"""^\s*(?:__version__|version)\s*=\s*["']([^"']+)["']""", text, re.MULTILINE)
+          if match is None:
+              sys.exit(f"no version literal found in {path}")
+          print(match.group(1))
+          PY
+          )"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME}"
+            create=false
+          else
+            if [ -z "${INPUT_VERSION}" ]; then
+              echo "::error::Run on a branch, this workflow needs the version to release (input 'version')."
+              exit 1
+            fi
+            tag="v${INPUT_VERSION#v}"
+            create=true
+          fi
+          if [ "${tag}" != "v${literal}" ]; then
+            echo "::error::${tag} does not match the version in ${VERSION_FILE} (${literal}); expected v${literal}."
+            exit 1
+          fi
+          # Asked of the remote, not the checkout: the commit an existing tag
+          # names (the peeled ^{} line for an annotated tag, else the only line).
+          remote="$(git ls-remote --tags origin "refs/tags/${tag}" "refs/tags/${tag}^{}")"
+          if [ "${create}" = "true" ] && [ -n "${remote}" ]; then
+            existing="$(printf '%s\n' "${remote}" | sort -k2 -r | head -n 1 | cut -f1)"
+            if [ "${existing}" != "${GITHUB_SHA}" ]; then
+              echo "::error::${tag} already exists, on ${existing}, not on this commit (${GITHUB_SHA}). Release a new version instead."
+              exit 1
+            fi
+            echo "${tag} already exists on this commit; publishing it again."
+            create=false
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "create=${create}" >> "$GITHUB_OUTPUT"
+          echo "releasing ${PRODUCT} ${tag} from ${GITHUB_SHA} (create tag: ${create})"
+
+      - name: Take the release notes from the changelog
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          python - "${TAG#v}" <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          version = sys.argv[1]
+          text = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
+          # From this version's heading to the next version heading (or the end).
+          pattern = re.compile(
+              rf"^## \[?{re.escape(version)}\]?[^\n]*\n(.*?)(?=^## |\Z)",
+              re.MULTILINE | re.DOTALL,
+          )
+          match = pattern.search(text)
+          if match is None:
+              raise SystemExit(f"CHANGELOG.md has no section for {version}; add one before releasing")
+          # Written from Python, not a shell redirect, so the encoding is fixed.
+          pathlib.Path("release_notes.md").write_text(match.group(1).strip() + "\n", encoding="utf-8")
+          PY
+          echo "wrote $(wc -l < release_notes.md) lines of notes"
+
+      - name: Create the tag
+        if: steps.tag.outputs.create == 'true'
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${TAG}" -m "${PRODUCT} ${TAG}" "${GITHUB_SHA}"
+          git push origin "refs/tags/${TAG}"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # A release made in the browser already exists; its notes are then
+          # replaced by the changelog's, so the two are always the same text.
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release edit "${TAG}" --repo "${GITHUB_REPOSITORY}" \
+              --title "${PRODUCT} ${TAG}" --notes-file release_notes.md
+          else
+            gh release create "${TAG}" --repo "${GITHUB_REPOSITORY}" --verify-tag \
+              --title "${PRODUCT} ${TAG}" --notes-file release_notes.md
+          fi

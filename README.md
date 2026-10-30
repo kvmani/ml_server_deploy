@@ -41,12 +41,18 @@ archive and assumes no internet and no help.
 
 ## Cutting a release
 
-1. Tag the component repository you changed.
-2. Edit that component's `ref` in [manifest.yml](manifest.yml). Leave `commit`
-   empty — the workflow resolves it and fails if the tag has moved.
-3. Bump `suite_version`.
-4. Tag this repository `vX.Y.Z` and push the tag.
-5. Download the two files from the Release page and carry them across.
+See [RELEASING.md](RELEASING.md): each component's release workflow, then this
+repository's, started by hand on `main`. The workflows create the tags and the
+Releases themselves, so the whole release can be done by an agent in a cloud
+session on request, or from the browser. In short:
+
+1. Release each changed component: version literal and CHANGELOG on `main`,
+   then its `release.yml` with `version = X.Y.Z`.
+2. Here: set those components' `ref` in [manifest.yml](manifest.yml) (leave
+   `commit` empty; the workflow resolves it) and bump `suite_version`.
+3. Start `release.yml` on `main` with `publish = false` (rehearsal), then
+   with `publish = true`.
+4. Download the two files from the Release page and carry them across.
 
 ## Design decisions worth knowing
 
