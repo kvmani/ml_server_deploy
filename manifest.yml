@@ -279,6 +279,9 @@ services:
 
   gateway:
     repo: kvmani/ml_server
+    # 1.5.0 (suite 1.20.0): the PDF Tools tile and help name the new PDF Editor,
+    # Split, and Page numbers & watermark tools and are found by searching for
+    # them. No behaviour, configuration or dependency change.
     # 1.4.0 (suite 1.19.0): the PyTex tile is found by searching for "variant",
     # "variant identification", "orientation relationship", "Burgers" or
     # "Kurdjumov-Sachs", and the PyTex help page gains the variant-misfit
@@ -287,7 +290,7 @@ services:
     # (a Secure session cookie on a plain-HTTP site, and a signing key that
     # differed between the two gunicorn workers) and added the versioned config
     # schema that update.sh validates and migrates shared/config against.
-    ref: v1.4.0
+    ref: v1.5.0
     commit: ""
     dir: ml_server
     import_check: ml_server
@@ -598,7 +601,12 @@ services:
   # run as their own services, so they have no unit and no port of their own.
   pdf_tools:
     repo: kvmani/pdf_tools
-    ref: v0.2.0
+    # 0.3.0 (suite 1.20.0): PDF Editor (/pdf_tools/editor), Split, and Page
+    # numbers & watermark, a redesigned interface, and an "All tools" link back
+    # to the portal. Adds two dependencies, both read from its pyproject.toml
+    # by the dependency gate: pypdfium2==5.14.0 (binary wheel) and
+    # reportlab>=4.4,<5. The office mirror must carry both.
+    ref: v0.3.0
     commit: ""
     dir: pdf_tools
     import_check: pdf_tools_service
