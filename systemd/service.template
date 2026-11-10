@@ -22,8 +22,11 @@ PartOf=@TARGET@
 Type=simple
 # Paths go through the `current` symlink rather than a versioned release
 # directory, for the same reason: a versioned path would change the unit text on
-# every release. It is also safer -- a versioned WorkingDirectory can be pruned
-# out from under a long-running process.
+# every release. This does NOT protect a running process from pruning: systemd
+# resolves the symlink when the service starts, and the process keeps that real
+# releases/<version>/ folder for life. update.sh therefore never prunes a release
+# a running service still uses (releases_in_use in lib/common.sh), and
+# health_check.sh fails a service whose release folder has been deleted.
 WorkingDirectory=@WORKDIR@
 # EnvironmentFile, when the service declares `env_file` in the manifest. It
 # points into shared/, never into a release, so the same file survives every

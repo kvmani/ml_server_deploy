@@ -99,6 +99,35 @@ check_units() {
     done
 }
 
+# A running service whose release folder has been deleted keeps answering its
+# health endpoint from memory, so nothing else here notices; the next file it
+# reads from disk fails (a blank Online Annotator, suite 1.23.0). Running from an
+# older, still present release is normal for a service an update left running.
+check_unit_release_dirs() {
+    local id unit pid rel state found current_rel
+    current_rel="$(basename "$(realpath -m "$RELEASE")")"
+    for id in $(service_ids); do
+        [[ "$(svc "$id" in_process false)" == "true" ]] && continue
+        unit="$(svc "$id" unit '')"
+        [[ -n "$unit" ]] || continue
+        pid="$(unit_main_pid "$unit")"
+        [[ -n "$pid" ]] || continue
+        found=0
+        while IFS=$'\t' read -r rel state; do
+            [[ -n "$rel" ]] || continue
+            found=1
+            if [[ "$state" == "deleted" ]]; then
+                record "$id" release "$unit" fail "runs from releases/${rel}, which has been deleted; restart it: systemctl --user restart ${unit}"
+            elif [[ "$rel" == "$current_rel" ]]; then
+                record "$id" release "$unit" ok "runs from releases/${rel} (current)"
+            else
+                record "$id" release "$unit" ok "runs from releases/${rel} (left running by an update; kept while in use)"
+            fi
+        done < <(releases_used_by_pid "$pid" "${ML_ROOT}/releases")
+        (( found )) || record "$id" release "$unit" ok "working directory outside releases/ or not readable"
+    done
+}
+
 # ---------------------------------------------------------------------------
 # 2. HTTP health endpoints
 # ---------------------------------------------------------------------------
@@ -566,6 +595,7 @@ check_admin_session() {
 # ---------------------------------------------------------------------------
 
 check_units
+check_unit_release_dirs
 check_health_endpoints
 check_gateway_routes
 check_offline_assets

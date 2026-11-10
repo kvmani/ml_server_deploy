@@ -197,6 +197,26 @@ journalctl --user -u ml-platform-portal.service -n 100
 journalctl --user -u 'ml-platform-*' -f
 ```
 
+### A tool shows a blank page some time after an update
+
+A service an update did not need to restart keeps running from the release it
+started in (systemd fixes its working folder at start). Suites up to 1.23.0
+could delete that old release while the service still used it: the service
+kept passing health checks from memory, then served blank pages once it next
+read a file. Later updates keep such a release (the log says
+`kept old release ...: still in use by ...`) and prune it only once nothing
+uses it, and `health_check.sh` fails a service whose folder is gone:
+
+```
+[ FAIL ] annotator    release  ml-platform-annotator.service  runs from releases/1.16.0, which has been deleted; restart it: ...
+```
+
+The fix is to restart that service. Data in `shared/` is never affected.
+
+```bash
+systemctl --user restart ml-platform-annotator.service
+```
+
 ### Restart one service by hand
 
 ```bash

@@ -744,7 +744,12 @@ else
     # it might still be the running release.
     if [[ -d "$TARGET_RELEASE" ]]; then
         warn "replacing existing ${TARGET_RELEASE}"
-        rm -rf "${TARGET_RELEASE}.superseded"
+        if [[ -d "${TARGET_RELEASE}.superseded" ]]; then
+            if [[ -n "$(releases_in_use "$RELEASES_DIR" | awk -F'\t' -v rel="$(basename "$TARGET_RELEASE").superseded" '$1 == rel')" ]]; then
+                fail_and_rollback "${TARGET_RELEASE}.superseded is still used by a running service; restart the suite's services, then retry"
+            fi
+            rm -rf "${TARGET_RELEASE}.superseded"
+        fi
         mv "$TARGET_RELEASE" "${TARGET_RELEASE}.superseded"
     fi
     mv "$INCOMING" "$TARGET_RELEASE"
@@ -1195,16 +1200,38 @@ history_append "$(printf '{"suite_version": "%s", "deployed_utc": "%s", "archive
 
 # --- B11. prune old releases -----------------------------------------------
 
+# A service left running across upgrades still lives in the release it started
+# from (see releases_in_use in lib/common.sh). Such a release is never deleted:
+# it is kept, said so, and pruned by a later update once nothing uses it.
+IN_USE="$(releases_in_use "$RELEASES_DIR")"
+release_users() {
+    # release_users <release> -> "unit (pid N)" list, or nothing
+    awk -F'\t' -v rel="$1" '$1 == rel { printf "%s%s (pid %s)", sep, $2, $3; sep = ", " }' <<<"$IN_USE"
+}
+
 mapfile -t ALL_RELEASES < <(find "$RELEASES_DIR" -maxdepth 1 -mindepth 1 -type d -printf '%f\n' | grep -v '\.\(incoming\|superseded\)$' | sort -V -r)
 KEPT=0
 for rel in "${ALL_RELEASES[@]}"; do
     KEPT=$(( KEPT + 1 ))
     (( KEPT <= ML_RELEASE_KEEP )) && continue
     [[ "$rel" == "$TARGET_VERSION" || "$rel" == "$PREVIOUS_VERSION" ]] && continue
+    users="$(release_users "$rel")"
+    if [[ -n "$users" ]]; then
+        log "kept old release ${rel}: still in use by ${users}; a later update prunes it once that has restarted"
+        continue
+    fi
     rm -rf "${RELEASES_DIR:?}/${rel}"
     log "pruned old release ${rel}"
 done
-rm -rf "${TARGET_RELEASE}.superseded" 2>/dev/null || true
+superseded="$(basename "$TARGET_RELEASE").superseded"
+if [[ -d "${TARGET_RELEASE}.superseded" ]]; then
+    users="$(release_users "$superseded")"
+    if [[ -n "$users" ]]; then
+        log "kept ${superseded}: still in use by ${users}"
+    else
+        rm -rf "${TARGET_RELEASE}.superseded"
+    fi
+fi
 
 # --- B12. documentation, built here ----------------------------------------
 #

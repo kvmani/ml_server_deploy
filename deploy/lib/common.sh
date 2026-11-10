@@ -269,6 +269,68 @@ unit_dir() {
 unit_is_active()  { sctl is-active  --quiet "$1" 2>/dev/null; }
 unit_is_enabled() { sctl is-enabled --quiet "$1" 2>/dev/null; }
 
+# ---------------------------------------------------------------------------
+# Which release a running service really uses
+#
+# systemd resolves WorkingDirectory=.../current/... to the real release folder
+# when a service starts, and the process keeps that folder for its whole life.
+# A service left running across upgrades (its code unchanged) therefore still
+# lives in an older releases/<version>/. Deleting that folder does not stop it --
+# code already loaded keeps answering, health checks pass -- but every file it
+# reads afterwards is gone: the Online Annotator served blank pages 30 minutes
+# after suite 1.23.0 pruned the release it had started from.
+# ---------------------------------------------------------------------------
+
+unit_main_pid() {
+    # unit_main_pid <unit> -> the unit's main PID, or nothing
+    [[ "${ML_SYSTEMD_SCOPE:-}" == "none" ]] && return 0
+    local pid
+    pid="$(sctl show -p MainPID --value "$1" 2>/dev/null || true)"
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] && echo "$pid"
+    return 0
+}
+
+releases_used_by_pid() {
+    # releases_used_by_pid <pid> <releases-dir>
+    # One line per release folder the process depends on: "<name>\t<state>",
+    # where state is "present" or "deleted". Looks at the working directory and
+    # at mapped files. ML_PROC_ROOT (default /proc) exists for the tests.
+    local pid="$1" releases proc cwd
+    releases="$(realpath -m "$2")"
+    proc="${ML_PROC_ROOT:-/proc}/${pid}"
+    [[ -d "$proc" ]] || return 0
+    {
+        cwd="$(readlink "${proc}/cwd" 2>/dev/null || true)"
+        [[ -n "$cwd" ]] && printf '%s\n' "$cwd"
+        if [[ -r "${proc}/maps" ]]; then
+            awk 'NF >= 6 { $1=$2=$3=$4=$5=""; sub(/^ +/, ""); print }' "${proc}/maps" 2>/dev/null || true
+        fi
+    } | while IFS= read -r path; do
+        [[ "$path" == "${releases}/"* ]] || continue
+        local rest="${path#"${releases}/"}" state=present
+        [[ "$path" == *" (deleted)" ]] && state=deleted
+        rest="${rest%% (deleted)}"
+        printf '%s\t%s\n' "${rest%%/*}" "$state"
+    done | sort -u
+}
+
+releases_in_use() {
+    # releases_in_use <releases-dir>
+    # "<release>\t<unit>\t<pid>\t<state>" for every running suite unit.
+    local releases="$1" id unit pid line
+    for id in $(service_ids); do
+        [[ "$(svc "$id" in_process false)" == "true" ]] && continue
+        unit="$(svc "$id" unit '')"
+        [[ -n "$unit" ]] || continue
+        pid="$(unit_main_pid "$unit")"
+        [[ -n "$pid" ]] || continue
+        while IFS=$'\t' read -r rel state; do
+            [[ -n "$rel" ]] && printf '%s\t%s\t%s\t%s\n' "$rel" "$unit" "$pid" "$state"
+        done < <(releases_used_by_pid "$pid" "$releases")
+    done
+    return 0
+}
+
 linger_enabled() {
     have_cmd loginctl || return 1
     [[ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" == "yes" ]]
