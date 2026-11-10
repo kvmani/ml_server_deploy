@@ -64,6 +64,15 @@ In this repository, on `main`:
 
 3. Commit and push `main`.
 
+### Package versions are locked to the office mirror
+
+`requirements/constraints.txt` pins every Python package to a version the
+office server has installed, and the build refuses any other. So a release
+changes a package only on purpose. When a component needs a newer one, the
+dependency gate fails naming it: ask the maintainer to confirm the mirror has
+it (`pip download --no-deps NAME==VERSION` on the server), then change that
+one line. Never unpin to make a build pass.
+
 ### 3. Rehearse, then publish
 
 1. Start `release.yml` on `main` with `publish = false`. It runs every gate,

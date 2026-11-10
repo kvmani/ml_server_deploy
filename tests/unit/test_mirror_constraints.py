@@ -53,3 +53,18 @@ def test_names_are_compared_the_way_pip_compares_them(tmp_path: Path) -> None:
     pins = dependency_gate.read_constraints(constraints)
     assert pins == {"threadpool-ctl": "3.6.0"}
     assert dependency_gate.constraint_violations("threadpool.ctl==3.7.0\n", pins)
+
+
+def test_the_office_mirror_lock_pins_the_whole_environment() -> None:
+    """Suite 1.22.0 was resolved without a lock and picked up versions newer
+    than the office mirror carries (filelock 4.2.10). Every package is now
+    pinned to a version the office has installed."""
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
+    from dependency_gate import CONSTRAINTS_FILE, read_constraints
+
+    pins = read_constraints(CONSTRAINTS_FILE)
+    assert len(pins) > 100
+    assert pins.get("filelock") == "4.2.9"
+    assert not {"torch", "torchvision"} & set(pins), "pre-installed packages are not locked"
