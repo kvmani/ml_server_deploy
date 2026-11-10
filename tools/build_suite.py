@@ -35,6 +35,7 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import tarfile
 import time
@@ -45,12 +46,19 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# Directories and files that must never reach the office server.
+# Directories that must never reach the office server, at any depth.
 EXCLUDE_DIRS = {
     ".git", ".github", "node_modules", "__pycache__", ".pytest_cache",
-    ".venv", "venv", "env", ".mypy_cache", ".ruff_cache", ".tox",
+    ".venv", ".mypy_cache", ".ruff_cache", ".tox",
     "htmlcov", ".idea", ".vscode", "playwright-report", ".playwright-cli",
-    "build", "dist", "logs", "output", "outputs", "tmp",
+}
+# Build and run-time leftovers, excluded only at the top of a component.
+# Deeper down these names are ordinary code: PDF.js ships its modules in
+# vendor/pdfjs/build/ and MathJax its fonts in vendor/mathjax/output/. Excluding
+# them everywhere silently removed both from suites up to 1.21.0, which stopped
+# the PDF Editor from starting and left help-page equations without their fonts.
+EXCLUDE_ROOT_DIRS = {
+    "build", "dist", "logs", "output", "outputs", "tmp", "venv", "env",
 }
 EXCLUDE_SUFFIXES = {
     ".pyc", ".pyo", ".log", ".coverage",
@@ -58,6 +66,9 @@ EXCLUDE_SUFFIXES = {
     ".pt", ".pth", ".ckpt", ".h5", ".hdf5", ".pkl", ".onnx", ".safetensors",
 }
 EXCLUDE_NAMES = {".coverage", ".DS_Store", "Thumbs.db"}
+# Below the top of a component, a tracked file may be left out only inside one
+# of these. Anything else missing from the copy fails the build.
+LOSSLESS_ANYWHERE = {".github", "__pycache__", ".idea", ".vscode"}
 
 GITHUB_PATTERN = re.compile(rb"https?://(?:[\w.-]+\.)?github(?:usercontent)?\.com", re.IGNORECASE)
 
@@ -74,23 +85,68 @@ class BuildError(Exception):
 # ---------------------------------------------------------------------------
 
 
-def _ignore(directory: str, entries: list[str]) -> set[str]:
-    ignored: set[str] = set()
-    for entry in entries:
-        if entry in EXCLUDE_DIRS or entry in EXCLUDE_NAMES:
-            ignored.add(entry)
+def _excluded(name: str, *, at_root: bool) -> bool:
+    if name in EXCLUDE_DIRS or name in EXCLUDE_NAMES:
+        return True
+    if at_root and name in EXCLUDE_ROOT_DIRS:
+        return True
+    return name.endswith(".egg-info") or any(name.endswith(suffix) for suffix in EXCLUDE_SUFFIXES)
+
+
+def _ignore_under(root: Path):
+    """A copytree ignore function for a tree whose top is `root`."""
+
+    top = root.resolve()
+
+    def ignore(directory: str, entries: list[str]) -> set[str]:
+        at_root = Path(directory).resolve() == top
+        return {entry for entry in entries if _excluded(entry, at_root=at_root)}
+
+    return ignore
+
+
+def tracked_files_lost(source: Path, destination: Path) -> list[str]:
+    """Files git tracks in `source` that the copy left out without a reason.
+
+    The exclusions are meant for build output and caches, never for code; a
+    tracked file under an excluded name is the sign of a rule matching too
+    much. Returns [] when `source` is not a git checkout.
+    """
+
+    if not (source / ".git").exists():
+        return []
+    listing = subprocess.run(
+        ["git", "-C", str(source), "ls-files", "-z"], capture_output=True, check=False
+    )
+    if listing.returncode != 0:
+        return []
+    lost = []
+    for raw in listing.stdout.split(b"\0"):
+        if not raw:
             continue
-        if any(entry.endswith(suffix) for suffix in EXCLUDE_SUFFIXES):
-            ignored.add(entry)
-        if entry.endswith(".egg-info"):
-            ignored.add(entry)
-    return ignored
+        relative = raw.decode("utf-8", "surrogateescape")
+        parts = relative.split("/")
+        # Judged independently of the exclusion lists, so that a rule widened
+        # by mistake (as `build` at every depth once was) is caught, not trusted.
+        if parts[0] in EXCLUDE_DIRS | EXCLUDE_ROOT_DIRS or parts[0].endswith(".egg-info"):
+            continue
+        if any(part in LOSSLESS_ANYWHERE for part in parts[:-1]):
+            continue
+        if any(parts[-1].endswith(suffix) for suffix in EXCLUDE_SUFFIXES) or parts[-1] in EXCLUDE_NAMES:
+            continue
+        if not (destination / relative).exists():
+            lost.append(relative)
+    return lost
 
 
 def copy_component(source: Path, destination: Path) -> int:
     if not source.is_dir():
         raise BuildError(f"component source is not a directory: {source}")
-    shutil.copytree(source, destination, ignore=_ignore, symlinks=False)
+    shutil.copytree(source, destination, ignore=_ignore_under(source), symlinks=False)
+    lost = tracked_files_lost(source, destination)
+    if lost:
+        shown = ", ".join(lost[:10]) + (f" and {len(lost) - 10} more" if len(lost) > 10 else "")
+        raise BuildError(f"{source.name}: {len(lost)} tracked file(s) would be left out of the archive: {shown}")
     return sum(1 for path in destination.rglob("*") if path.is_file())
 
 
@@ -311,8 +367,8 @@ def assemble(manifest: dict[str, Any], sources: dict[str, Path], staging: Path,
     # Deployment scripts, unit template and requirements travel with the release
     # so that the archive is self-sufficient and the scripts always match the
     # manifest they were built against.
-    shutil.copytree(deploy_root / "deploy", staging / "deploy", ignore=_ignore)
-    shutil.copytree(deploy_root / "systemd", staging / "systemd", ignore=_ignore)
+    shutil.copytree(deploy_root / "deploy", staging / "deploy", ignore=_ignore_under(deploy_root / "deploy"))
+    shutil.copytree(deploy_root / "systemd", staging / "systemd", ignore=_ignore_under(deploy_root / "systemd"))
     # Which requirements directory ships is explicit rather than implicit.
     # It used to be whatever happened to be in the repository, which meant a
     # rehearsal archive built after the dependency gate silently inherited the
@@ -320,7 +376,7 @@ def assemble(manifest: dict[str, Any], sources: dict[str, Path], staging: Path,
     # network deliberately blocked. Rehearsals now pass their own directory.
     source_requirements = requirements_dir or (deploy_root / "requirements")
     if source_requirements.is_dir():
-        shutil.copytree(source_requirements, staging / "requirements", ignore=_ignore)
+        shutil.copytree(source_requirements, staging / "requirements", ignore=_ignore_under(source_requirements))
     else:
         (staging / "requirements").mkdir()
 

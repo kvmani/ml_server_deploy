@@ -14,7 +14,7 @@
 # production release.
 
 schema: ml-suite.manifest.v1
-suite_version: 1.21.0
+suite_version: 1.22.0
 
 platform:
   os_id: ubuntu
@@ -360,6 +360,15 @@ services:
       - /pdf_tools/
       - /tabular_ml/
       - /static/vendor/mathjax/tex-chtml-full.js
+      # Files a page needs but does not itself prove present. Up to suite
+      # 1.21.0 the packager dropped every folder named build/ or output/, so
+      # the PDF Editor's PDF.js module and MathJax's fonts were missing while
+      # every page above still answered 200.
+      - /pdf_tools/editor/
+      - /pdf_tools/static/js/editor.js
+      - /pdf_tools/static/vendor/pdfjs/legacy/build/pdf.mjs
+      - /pdf_tools/static/vendor/pdfjs/legacy/build/pdf.worker.mjs
+      - /static/vendor/mathjax/output/chtml/fonts/woff-v2/MathJax_Main-Regular.woff
 
   pytex:
     repo: kvmani/pytex
@@ -601,7 +610,8 @@ services:
   # run as their own services, so they have no unit and no port of their own.
   pdf_tools:
     repo: kvmani/pdf_tools
-    # 0.3.1 (suite 1.21.0): the PDF Editor works in the office's Chrome 134
+    # 0.3.1 (suite 1.22.0; the 1.21.0 archive lacked PDF.js, see build_suite.py):
+    # the PDF Editor works in the office's Chrome 134
     # (legacy PDF.js build; the modern one needs Chrome 140), verified in Chrome
     # 134 mounted in the portal; a red notice names the cause if the editor ever
     # fails to start. No dependency change.
