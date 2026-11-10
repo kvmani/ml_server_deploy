@@ -14,7 +14,7 @@
 # production release.
 
 schema: ml-suite.manifest.v1
-suite_version: 1.20.0
+suite_version: 1.21.0
 
 platform:
   os_id: ubuntu
@@ -601,12 +601,16 @@ services:
   # run as their own services, so they have no unit and no port of their own.
   pdf_tools:
     repo: kvmani/pdf_tools
+    # 0.3.1 (suite 1.21.0): the PDF Editor works in the office's Chrome 134
+    # (legacy PDF.js build; the modern one needs Chrome 140), verified in Chrome
+    # 134 mounted in the portal; a red notice names the cause if the editor ever
+    # fails to start. No dependency change.
     # 0.3.0 (suite 1.20.0): PDF Editor (/pdf_tools/editor), Split, and Page
     # numbers & watermark, a redesigned interface, and an "All tools" link back
     # to the portal. Adds two dependencies, both read from its pyproject.toml
     # by the dependency gate: pypdfium2==5.14.0 (binary wheel) and
     # reportlab>=4.4,<5. The office mirror must carry both.
-    ref: v0.3.0
+    ref: v0.3.1
     commit: ""
     dir: pdf_tools
     import_check: pdf_tools_service
