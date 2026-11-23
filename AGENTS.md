@@ -19,7 +19,7 @@ and human contributor; it is the only agent-instruction file in the repository.
    branch for the task. No feature branches or pull requests by default. Fetch again before
    pushing; if the push is rejected, `git pull --rebase origin main`, rerun the affected tests,
    then push. Never force-push or rewrite published history.
-3. **Keep the progress ledger current:** [`docs/PROGRESS.md`](docs/PROGRESS.md). Before coding, add (or claim)
+3. **Keep the progress ledger current:** [`docs/development/active_task_progress.md`](docs/development/active_task_progress.md). Before coding, add (or claim)
    the task entry: goal, plan, who is working on it, date. After each meaningful step record what
    was done, the commit, test evidence, decisions, blockers and the next step. Commit the ledger
    with the work it describes. A new session must be able to resume from the ledger and git
@@ -37,6 +37,19 @@ and human contributor; it is the only agent-instruction file in the repository.
 The cardinal rules decide *how work is done* (sync, branch, ledger, test scope, CI). The project
 rules in this file decide *what this repository must achieve and protect*; nothing generic here
 relaxes them. If a project rule and a cardinal rule genuinely conflict, stop and ask the owner.
+
+## Platform membership
+
+This repository is a member of the Office Scientific Tools platform and follows the
+[Platform Vision and Engineering Governance](https://github.com/kvmani/ml_server/blob/main/docs/PLATFORM_VISION_AND_GOVERNANCE.md)
+(`kvmani/ml_server`, `docs/PLATFORM_VISION_AND_GOVERNANCE.md`). Local rules in this file stay
+authoritative for this repository's scientific, testing, safety and documentation requirements;
+where a local rule is stricter, it applies. In practice: stay independently deployable (no
+dependency on `ml_server`), keep the health endpoint and the reported version truthful, stage
+explicit paths when committing so unrelated work is never swept in, and record a goal that spans
+several repositories in a coordinating ledger under `ml_server/docs/development/` as well.
+Read the governance document when a task touches a shared contract (health, version, catalog,
+feedback, URLs), a release, or another repository.
 
 ## Project rules
 
@@ -133,4 +146,4 @@ the office server.
 | Office operation, recovery, first-time setup | [RUNBOOK.md](RUNBOOK.md) |
 | What is pinned and seeded | [manifest.yml](manifest.yml) |
 | Office host inventory reference | [docs/office_inventory_reference.txt](docs/office_inventory_reference.txt) |
-| Current work and history | [docs/PROGRESS.md](docs/PROGRESS.md) |
+| Current work and history | [docs/development/active_task_progress.md](docs/development/active_task_progress.md) |
